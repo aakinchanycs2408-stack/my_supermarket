@@ -32,6 +32,8 @@ Render can use `render.yaml`. The service must expose the platform-provided `POR
 3. Run the Vercel build with `npm run build` and publish the Vite `dist` directory.
 4. Set the same URL in the backend `FRONTEND_URL` allow-list.
 
+`VITE_API_URL` is required for a split Vercel/Express deployment. Do not leave it unset, point it at localhost, or use the Vercel frontend URL. After changing it, trigger a new Vercel deployment because Vite embeds this value at build time.
+
 ## Smoke test
 
 ```text
