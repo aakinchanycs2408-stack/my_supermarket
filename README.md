@@ -28,14 +28,14 @@ Built from the supplied master requirements.
 
 ## Setup
 1. `npm install`
-2. Copy `.env.example` to `.env` (the default uses a local SQLite database)
-4. `npm run db:push`
-5. `npm run db:seed`
-6. `npm run dev`
+2. Copy `.env.example` to `.env` and configure PostgreSQL
+3. `npm run db:migrate`
+4. `npm run db:seed` for an intentional development/bootstrap setup
+5. `npm run dev`
 
 Demo:
 - Admin: `admin@demo.local` / `Admin@123`
 - Cashier: `cashier@demo.local` / `Cashier@123`
 
-## Production caveat
-Printer hardware integration, cloud backup, CSV import/export, automated test suites, rate limiting, refresh-token sessions, and some advanced screens still require environment-specific implementation and verification. This package does not falsely claim those are complete.
+## Production status
+Security middleware, restricted CORS, request limits, login rate limiting, active-user checks, PostgreSQL migrations, idempotent sales, atomic stock reservation, safe invoice counters, deployment configuration, and API boundary tests are included. See `PRODUCTION-CHECKLIST.md` for the remaining operational and accounting work that must be completed before a real store deployment.

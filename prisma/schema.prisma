@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -59,6 +59,7 @@ model Shop {
   inventoryMovements InventoryMovement[]
   auditLogs AuditLog[]
   expenseCategories ExpenseCategory[]
+  invoiceCounters InvoiceCounter[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -78,6 +79,7 @@ model User {
   returns SaleReturn[]
   expenses Expense[]
   auditLogs AuditLog[]
+  idempotencyKeys IdempotencyKey[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -184,12 +186,14 @@ model Sale {
   discount Decimal @default(0)
   tax Decimal @default(0)
   total Decimal
+  idempotencyKey String?
   status SaleStatus @default(COMPLETED)
   items SaleItem[]
   payments Payment[]
   returns SaleReturn[]
   createdAt DateTime @default(now())
   @@unique([shopId, invoiceNumber])
+  @@unique([shopId, idempotencyKey])
   @@index([shopId, createdAt])
 }
 model SaleItem {
@@ -200,6 +204,7 @@ model SaleItem {
   product Product @relation(fields: [productId], references: [id])
   quantity Decimal
   unitPrice Decimal
+  unitCost Decimal
   discount Decimal @default(0)
   tax Decimal @default(0)
   total Decimal
@@ -306,5 +311,27 @@ model AuditLog {
   entityId String?
   metadata Json?
   createdAt DateTime @default(now())
+  @@index([shopId, createdAt])
+}
+
+model InvoiceCounter {
+  id String @id @default(cuid())
+  shopId String
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  year Int
+  value Int @default(0)
+  @@unique([shopId, year])
+}
+
+model IdempotencyKey {
+  id String @id @default(cuid())
+  shopId String
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  operation String
+  key String
+  response Json?
+  createdAt DateTime @default(now())
+  @@unique([shopId, operation, key])
   @@index([shopId, createdAt])
 }
