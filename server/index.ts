@@ -1,0 +1,111 @@
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import { PrismaClient, Role, PaymentMethod, InventoryMovementType } from "@prisma/client";
+import { z } from "zod";
+
+const db=new PrismaClient(), app=express();
+app.use(cors()); app.use(express.json());
+const SECRET=process.env.JWT_SECRET||"dev-secret-change-me";
+type Auth={userId:string;shopId:string;role:Role};
+const getAuth=(req:express.Request)=>(req as any).auth as Auth;
+
+function auth(req:express.Request,res:express.Response,next:express.NextFunction){
+ const t=req.headers.authorization?.replace("Bearer ","");
+ if(!t)return res.status(401).json({error:"Authentication required"});
+ try{(req as any).auth=jwt.verify(t,SECRET);next()}catch{return res.status(401).json({error:"Invalid or expired session"});}
+}
+async function allowed(a:Auth,code:string){if(a.role===Role.ADMIN)return true;return !!await db.userPermission.findFirst({where:{userId:a.userId,permission:{code},enabled:true}})}
+const perm=(code:string)=>async(req:express.Request,res:express.Response,next:express.NextFunction)=>{if(await allowed(getAuth(req),code))return next();res.status(403).json({error:`Missing permission: ${code}`})};
+const admin=perm("USER_MANAGE");
+
+app.get("/api/health",(_,r)=>r.json({ok:true}));
+
+app.post("/api/auth/login",async(req,res)=>{
+ const p=z.object({email:z.string().email(),password:z.string()}).safeParse(req.body);
+ if(!p.success)return res.status(400).json({error:"Invalid credentials"});
+ try {
+  const u=await db.user.findUnique({where:{email:p.data.email}});
+  if(!u||!u.active||!(await bcrypt.compare(p.data.password,u.passwordHash)))return res.status(401).json({error:"Invalid email or password"});
+  const token=jwt.sign({userId:u.id,shopId:u.shopId,role:u.role},SECRET,{expiresIn:"8h"});
+  res.json({token,user:{id:u.id,name:u.name,email:u.email,role:u.role,shopId:u.shopId}});
+ } catch {
+  res.status(503).json({error:"Database unavailable. Configure DATABASE_URL and start PostgreSQL."});
+ }
+});
+app.get("/api/me",auth,async(req,res)=>res.json(await db.user.findUnique({where:{id:getAuth(req).userId},select:{id:true,name:true,email:true,role:true,shopId:true}})));
+
+app.get("/api/products",auth,perm("PRODUCT_VIEW"),async(req,res)=>{
+ const a=getAuth(req),q=String(req.query.q||"").trim();
+ res.json(await db.product.findMany({where:{shopId:a.shopId,active:true,OR:q?[{name:{contains:q}},{sku:{contains:q}},{barcode:{contains:q}}]:undefined},orderBy:{name:"asc"},take:100}));
+});
+app.post("/api/products",auth,perm("PRODUCT_CREATE"),async(req,res)=>{
+ const a=getAuth(req); const p=z.object({sku:z.string().min(1),barcode:z.string().optional(),name:z.string().min(1),purchasePrice:z.coerce.number().nonnegative(),sellingPrice:z.coerce.number().nonnegative(),mrp:z.coerce.number().nonnegative().optional(),taxRate:z.coerce.number().min(0).max(100).default(0),stock:z.coerce.number().nonnegative().default(0),minimumStock:z.coerce.number().nonnegative().default(0)}).safeParse(req.body);
+ if(!p.success)return res.status(400).json({error:"Invalid product data"});
+ try{const x=await db.product.create({data:{...p.data,shopId:a.shopId}});res.status(201).json(x)}catch{res.status(409).json({error:"SKU or barcode already exists"})}
+});
+app.patch("/api/products/:id",auth,perm("PRODUCT_EDIT"),async(req,res)=>{
+ const a=getAuth(req);const p=z.object({name:z.string().min(1).optional(),sellingPrice:z.coerce.number().nonnegative().optional(),purchasePrice:z.coerce.number().nonnegative().optional(),mrp:z.coerce.number().nonnegative().optional(),taxRate:z.coerce.number().min(0).max(100).optional(),minimumStock:z.coerce.number().nonnegative().optional(),active:z.boolean().optional()}).safeParse(req.body);
+ if(!p.success)return res.status(400).json({error:"Invalid update"});
+ const x=await db.product.updateMany({where:{id:String(req.params.id),shopId:a.shopId},data:p.data});
+ if(!x.count)return res.status(404).json({error:"Product not found"});res.json({ok:true});
+});
+
+app.get("/api/customers",auth,perm("CUSTOMER_VIEW"),async(req,res)=>res.json(await db.customer.findMany({where:{shopId:getAuth(req).shopId},orderBy:{name:"asc"}})));
+app.post("/api/customers",auth,perm("CUSTOMER_CREATE"),async(req,res)=>{const a=getAuth(req),p=z.object({name:z.string().min(1),phone:z.string().optional(),email:z.string().email().optional(),address:z.string().optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid customer"});res.status(201).json(await db.customer.create({data:{...p.data,shopId:a.shopId}}))});
+app.patch("/api/customers/:id",auth,perm("CUSTOMER_EDIT"),async(req,res)=>{const a=getAuth(req),p=z.object({name:z.string().min(1).optional(),phone:z.string().optional(),email:z.string().email().optional(),address:z.string().optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid customer"});const x=await db.customer.updateMany({where:{id:String(req.params.id),shopId:a.shopId},data:p.data});if(!x.count)return res.status(404).json({error:"Customer not found"});res.json({ok:true})});
+
+app.get("/api/cashiers",auth,admin,async(req,res)=>res.json(await db.user.findMany({where:{shopId:getAuth(req).shopId,role:Role.CASHIER},select:{id:true,name:true,email:true,active:true,counterId:true,counter:{select:{name:true}},permissions:{include:{permission:true}}}})));
+app.get("/api/permissions",auth,admin,async(_,res)=>res.json(await db.permission.findMany({orderBy:{code:"asc"}})));
+app.get("/api/counters",auth,async(req,res)=>res.json(await db.counter.findMany({where:{shopId:getAuth(req).shopId},orderBy:{name:"asc"}})));
+app.get("/api/suppliers",auth,perm("SUPPLIER_VIEW"),async(req,res)=>res.json(await db.supplier.findMany({where:{shopId:getAuth(req).shopId},orderBy:{name:"asc"},include:{_count:{select:{purchases:true}}}})));
+app.post("/api/suppliers",auth,perm("SUPPLIER_CREATE"),async(req,res)=>{const a=getAuth(req),p=z.object({name:z.string().min(1),phone:z.string().optional(),email:z.string().email().optional(),address:z.string().optional(),gstin:z.string().optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid supplier"});res.status(201).json(await db.supplier.create({data:{...p.data,shopId:a.shopId}}))});
+app.patch("/api/suppliers/:id",auth,perm("SUPPLIER_CREATE"),async(req,res)=>{const a=getAuth(req),p=z.object({name:z.string().min(1).optional(),phone:z.string().optional(),email:z.string().email().optional(),address:z.string().optional(),gstin:z.string().optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid supplier"});const x=await db.supplier.updateMany({where:{id:String(req.params.id),shopId:a.shopId},data:p.data});if(!x.count)return res.status(404).json({error:"Supplier not found"});res.json({ok:true})});
+app.get("/api/shop",auth,async(req,res)=>res.json(await db.shop.findUnique({where:{id:getAuth(req).shopId}})));
+app.patch("/api/shop",auth,perm("SETTINGS_MANAGE"),async(req,res)=>{const a=getAuth(req),p=z.object({name:z.string().min(1),address:z.string().optional(),phone:z.string().optional(),email:z.string().email().optional(),gstin:z.string().optional(),invoicePrefix:z.string().min(1).max(8)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid shop settings"});res.json(await db.shop.update({where:{id:a.shopId},data:p.data}))});
+app.post("/api/cashiers",auth,perm("CASHIER_MANAGE"),async(req,res)=>{const a=getAuth(req),p=z.object({name:z.string().min(1),email:z.string().email(),password:z.string().min(8),counterId:z.string().optional(),permissions:z.array(z.string()).default([])}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid cashier data"});try{const u=await db.user.create({data:{shopId:a.shopId,name:p.data.name,email:p.data.email,passwordHash:await bcrypt.hash(p.data.password,12),role:Role.CASHIER,counterId:p.data.counterId}});const ps=await db.permission.findMany({where:{code:{in:p.data.permissions}}});if(ps.length)await db.userPermission.createMany({data:ps.map(x=>({userId:u.id,permissionId:x.id,enabled:true}))});res.status(201).json(u)}catch{res.status(409).json({error:"Unable to create cashier"})}});
+app.patch("/api/cashiers/:id",auth,perm("CASHIER_MANAGE"),async(req,res)=>{const a=getAuth(req),p=z.object({name:z.string().min(1).optional(),active:z.boolean().optional(),counterId:z.string().nullable().optional(),password:z.string().min(8).optional(),permissions:z.array(z.string()).optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid update"});const u=await db.user.findFirst({where:{id:String(req.params.id),shopId:a.shopId,role:Role.CASHIER}});if(!u)return res.status(404).json({error:"Cashier not found"});const data:any={};if(p.data.name!==undefined)data.name=p.data.name;if(p.data.active!==undefined)data.active=p.data.active;if(p.data.counterId!==undefined)data.counterId=p.data.counterId;if(p.data.password)data.passwordHash=await bcrypt.hash(p.data.password,12);await db.$transaction(async tx=>{await tx.user.update({where:{id:u.id},data});if(p.data.permissions){await tx.userPermission.deleteMany({where:{userId:u.id}});const ps=await tx.permission.findMany({where:{code:{in:p.data.permissions}}});if(ps.length)await tx.userPermission.createMany({data:ps.map(x=>({userId:u.id,permissionId:x.id,enabled:true}))});}await tx.auditLog.create({data:{shopId:a.shopId,userId:a.userId,action:"CASHIER_UPDATED",entity:"User",entityId:u.id}})});res.json({ok:true})});
+
+app.get("/api/sales",auth,perm("BILL_VIEW"),async(req,res)=>{const a=getAuth(req);res.json(await db.sale.findMany({where:{shopId:a.shopId},include:{cashier:{select:{name:true}},customer:{select:{name:true}},payments:true,items:{include:{product:true}}},orderBy:{createdAt:"desc"},take:200}))});
+app.post("/api/sales",auth,perm("BILL_CREATE"),async(req,res)=>{
+ const a=getAuth(req),p=z.object({customerId:z.string().optional(),discount:z.coerce.number().nonnegative().default(0),items:z.array(z.object({productId:z.string(),quantity:z.coerce.number().positive()})).min(1),payments:z.array(z.object({method:z.nativeEnum(PaymentMethod),amount:z.coerce.number().positive()})).min(1)}).safeParse(req.body);
+ if(!p.success)return res.status(400).json({error:"Invalid sale data"});
+ try{
+  const sale=await db.$transaction(async tx=>{
+   const lines:any[]=[];let subtotal=0,tax=0;
+   for(const i of p.data.items){const product=await tx.product.findFirst({where:{id:i.productId,shopId:a.shopId,active:true}});if(!product)throw Error("Product not found");if(Number(product.stock)<i.quantity)throw Error(`Insufficient stock for ${product.name}`);const base=Number(product.sellingPrice)*i.quantity;const t=base*Number(product.taxRate)/100;subtotal+=base;tax+=t;lines.push({i,product,base,t})}
+   const total=Math.max(0,subtotal-p.data.discount+tax),paid=p.data.payments.reduce((s,x)=>s+x.amount,0);
+   if(paid<total&&!p.data.payments.some(x=>x.method===PaymentMethod.CREDIT))throw Error(`Payment is short by ${money(total-paid)}`);
+   const shop=await tx.shop.findUniqueOrThrow({where:{id:a.shopId}});const count=await tx.sale.count({where:{shopId:a.shopId}});const invoice=`${shop.invoicePrefix}-${new Date().getFullYear()}-${String(count+1).padStart(6,"0")}`;
+   const s=await tx.sale.create({data:{shopId:a.shopId,invoiceNumber:invoice,cashierId:a.userId,customerId:p.data.customerId,subtotal,discount:p.data.discount,tax,total}});
+   for(const l of lines){await tx.saleItem.create({data:{saleId:s.id,productId:l.product.id,quantity:l.i.quantity,unitPrice:Number(l.product.sellingPrice),tax:l.t,total:l.base+l.t}});await tx.product.update({where:{id:l.product.id},data:{stock:{decrement:l.i.quantity}}});await tx.inventoryMovement.create({data:{shopId:a.shopId,productId:l.product.id,type:"SALE",quantity:-l.i.quantity,referenceId:s.id,userId:a.userId}})}
+   for(const x of p.data.payments)await tx.payment.create({data:{saleId:s.id,method:x.method,amount:x.amount}});
+   if(p.data.customerId){const credit=p.data.payments.filter(x=>x.method===PaymentMethod.CREDIT).reduce((s,x)=>s+x.amount,0);if(credit)await tx.customer.update({where:{id:p.data.customerId},data:{creditBalance:{increment:credit}}})}
+   await tx.auditLog.create({data:{shopId:a.shopId,userId:a.userId,action:"SALE_CREATED",entity:"Sale",entityId:s.id,metadata:{invoice}}});return tx.sale.findUnique({where:{id:s.id},include:{items:{include:{product:true}},payments:true,customer:true,cashier:{select:{name:true}}}});
+  });res.status(201).json(sale);
+ }catch(e:any){res.status(400).json({error:e.message||"Sale failed; no changes were committed"})}
+});
+
+app.post("/api/returns",auth,perm("REFUND_CREATE"),async(req,res)=>{
+ const a=getAuth(req),p=z.object({saleId:z.string(),reason:z.string().min(2),items:z.array(z.object({saleItemId:z.string(),quantity:z.coerce.number().positive()})).min(1)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid return data"});
+ try{const out=await db.$transaction(async tx=>{const sale=await tx.sale.findFirst({where:{id:p.data.saleId,shopId:a.shopId},include:{items:true}});if(!sale)throw Error("Original sale not found");let refund=0;const r=await tx.saleReturn.create({data:{shopId:a.shopId,saleId:sale.id,userId:a.userId,refundAmount:0,reason:p.data.reason}});for(const i of p.data.items){const si=sale.items.find(x=>x.id===i.saleItemId);if(!si)throw Error("Sale item not found");const prior=await tx.returnItem.aggregate({where:{saleItemId:si.id},_sum:{quantity:true}});if(Number(prior._sum.quantity||0)+i.quantity>Number(si.quantity))throw Error("Return quantity exceeds sold quantity");const amount=Number(si.unitPrice)*i.quantity;refund+=amount;await tx.returnItem.create({data:{returnId:r.id,saleItemId:si.id,productId:si.productId,quantity:i.quantity,amount}});await tx.product.update({where:{id:si.productId},data:{stock:{increment:i.quantity}}});await tx.inventoryMovement.create({data:{shopId:a.shopId,productId:si.productId,type:InventoryMovementType.RETURN,quantity:i.quantity,referenceId:r.id,userId:a.userId}})}await tx.saleReturn.update({where:{id:r.id},data:{refundAmount:refund}});await tx.auditLog.create({data:{shopId:a.shopId,userId:a.userId,action:"SALE_RETURN",entity:"SaleReturn",entityId:r.id,metadata:{saleId:sale.id,refund}}});return {id:r.id,refund}});res.status(201).json(out)}catch(e:any){res.status(400).json({error:e.message})}
+});
+app.get("/api/returns",auth,perm("REFUND_CREATE"),async(req,res)=>res.json(await db.saleReturn.findMany({where:{shopId:getAuth(req).shopId},include:{sale:{select:{invoiceNumber:true}},items:{include:{product:true}}},orderBy:{createdAt:"desc"},take:200})));
+
+app.get("/api/purchases",auth,perm("PURCHASE_CREATE"),async(req,res)=>res.json(await db.purchase.findMany({where:{shopId:getAuth(req).shopId},include:{supplier:{select:{name:true}},items:{include:{product:{select:{name:true,sku:true}}}}},orderBy:{createdAt:"desc"},take:200})));
+app.post("/api/purchases",auth,perm("PURCHASE_CREATE"),async(req,res)=>{const a=getAuth(req),p=z.object({supplierId:z.string().optional(),invoiceNumber:z.string().min(1),items:z.array(z.object({productId:z.string(),quantity:z.coerce.number().positive(),unitPrice:z.coerce.number().nonnegative()})).min(1)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid purchase data"});try{const out=await db.$transaction(async tx=>{const lines=p.data.items.map(i=>({...i,total:i.quantity*i.unitPrice}));const total=lines.reduce((s,i)=>s+i.total,0);const purchase=await tx.purchase.create({data:{shopId:a.shopId,supplierId:p.data.supplierId||undefined,invoiceNumber:p.data.invoiceNumber,total}});for(const i of lines){const product=await tx.product.findFirst({where:{id:i.productId,shopId:a.shopId}});if(!product)throw Error("Product not found");await tx.purchaseItem.create({data:{purchaseId:purchase.id,productId:i.productId,quantity:i.quantity,unitPrice:i.unitPrice,total:i.total}});await tx.product.update({where:{id:i.productId},data:{stock:{increment:i.quantity},purchasePrice:i.unitPrice}});await tx.inventoryMovement.create({data:{shopId:a.shopId,productId:i.productId,type:InventoryMovementType.PURCHASE,quantity:i.quantity,referenceId:purchase.id,userId:a.userId}})}return purchase});res.status(201).json(out)}catch(e:any){res.status(400).json({error:e.message||"Purchase failed"})}});
+
+app.get("/api/inventory",auth,perm("INVENTORY_VIEW"),async(req,res)=>{const a=getAuth(req),q=String(req.query.q||"").trim();res.json(await db.product.findMany({where:{shopId:a.shopId,OR:q?[{name:{contains:q}},{sku:{contains:q}},{barcode:{contains:q}}]:undefined},orderBy:{name:"asc"},take:500}))});
+app.patch("/api/inventory/:id",auth,perm("INVENTORY_ADJUST"),async(req,res)=>{const a=getAuth(req),p=z.object({quantity:z.coerce.number().nonnegative(),reason:z.string().min(2)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Quantity and reason are required"});try{const x=await db.$transaction(async tx=>{const old=await tx.product.findFirst({where:{id:String(req.params.id),shopId:a.shopId}});if(!old)throw Error("Product not found");const u=await tx.product.update({where:{id:old.id},data:{stock:p.data.quantity}});await tx.inventoryMovement.create({data:{shopId:a.shopId,productId:old.id,type:"ADJUSTMENT",quantity:p.data.quantity-Number(old.stock),reason:p.data.reason,userId:a.userId}});await tx.auditLog.create({data:{shopId:a.shopId,userId:a.userId,action:"STOCK_ADJUSTED",entity:"Product",entityId:old.id,metadata:{from:Number(old.stock),to:p.data.quantity,reason:p.data.reason}}});return u});res.json(x)}catch(e:any){res.status(400).json({error:e.message})}});
+
+app.get("/api/dashboard",auth,async(req,res)=>{const a=getAuth(req),start=new Date();start.setHours(0,0,0,0);const sales=await db.sale.aggregate({where:{shopId:a.shopId,status:"COMPLETED",createdAt:{gte:start}},_sum:{total:true},_count:{id:true}});const products=await db.product.count({where:{shopId:a.shopId,active:true}});const all=await db.product.findMany({where:{shopId:a.shopId,active:true},select:{stock:true,minimumStock:true}});const low=all.filter(x=>Number(x.stock)<=Number(x.minimumStock)).length;res.json({sales:Number(sales._sum.total||0),orders:sales._count.id,products,lowStock:low})});
+
+app.get("/api/expenses",auth,perm("EXPENSE_MANAGE"),async(req,res)=>res.json(await db.expense.findMany({where:{shopId:getAuth(req).shopId},orderBy:{createdAt:"desc"},take:200})));
+app.post("/api/expenses",auth,perm("EXPENSE_MANAGE"),async(req,res)=>{const a=getAuth(req),p=z.object({categoryName:z.string().min(1),amount:z.coerce.number().positive(),description:z.string().optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid expense"});res.status(201).json(await db.expense.create({data:{...p.data,shopId:a.shopId,userId:a.userId}}))});
+
+app.get("/api/reports/summary",auth,perm("REPORT_VIEW"),async(req,res)=>{const a=getAuth(req);const from=req.query.from?new Date(String(req.query.from)):new Date(new Date().setHours(0,0,0,0));const to=req.query.to?new Date(String(req.query.to)):new Date();const sales=await db.sale.findMany({where:{shopId:a.shopId,status:"COMPLETED",createdAt:{gte:from,lte:to}},include:{items:{include:{product:true}},payments:true}});const expenses=await db.expense.aggregate({where:{shopId:a.shopId,createdAt:{gte:from,lte:to}},_sum:{amount:true}});let revenue=0,cogs=0;for(const s of sales){revenue+=Number(s.total);for(const i of s.items)cogs+=Number(i.product.purchasePrice)*Number(i.quantity)}const gross=revenue-cogs,exp=Number(expenses._sum.amount||0);res.json({revenue,cogs,grossProfit:gross,expenses:exp,netProfit:gross-exp,orders:sales.length})});
+
+function money(n:number){return `₹${n.toFixed(2)}`}
+app.listen(Number(process.env.PORT)||4000,()=>console.log("API running on http://localhost:4000"));
