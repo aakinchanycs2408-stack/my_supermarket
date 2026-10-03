@@ -468,6 +468,13 @@ function SingleBillWorkspace({
   const billRef = useRef(bill);
   useEffect(() => { billRef.current = bill; }, [bill]);
 
+  // Customer search state
+  const [custSearch, setCustSearch] = useState('');
+  const [custResults, setCustResults] = useState<Customer[]>([]);
+  const [custDropOpen, setCustDropOpen] = useState(false);
+  const [custSearching, setCustSearching] = useState(false);
+  const custRef = useRef<HTMLInputElement>(null);
+
   const [isPayModalOpen, setIsPayModalOpen] = useState(false);
   const [method, setMethod] = useState<'CASH' | 'UPI' | 'CARD' | 'CREDIT' | 'SPLIT'>('CASH');
   const [cashReceived, setCashReceived] = useState('');
@@ -482,12 +489,32 @@ function SingleBillWorkspace({
   const [showKbdPopover, setShowKbdPopover] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  // Load quick-access products (top 8 most stocked products)
+  // Load quick-access products from API (admin-configurable)
   useEffect(() => {
-    api('/api/products?limit=16').then((res: Product[]) => {
-      setQuickProducts(res.filter(p => Number(p.stock) > 0).slice(0, 8));
-    }).catch(() => {});
+    api('/api/quick-access').then((res: any[]) => {
+      const prods = res
+        .filter(item => item.product && Number(item.product.stock) > 0)
+        .map(item => ({ ...item.product, _badgeText: item.badgeText, _badgeColor: item.badgeColor }));
+      setQuickProducts(prods);
+    }).catch(() => {
+      // Fallback to top products if quick-access not configured
+      api('/api/products?limit=16').then((res: Product[]) => {
+        setQuickProducts(res.filter(p => Number(p.stock) > 0).slice(0, 8));
+      }).catch(() => {});
+    });
   }, []);
+
+  // Debounced customer search
+  useEffect(() => {
+    if (!custDropOpen) return;
+    const t = setTimeout(() => {
+      setCustSearching(true);
+      api(`/api/customers/search?q=${encodeURIComponent(custSearch.trim())}`)
+        .then(res => { setCustResults(res); setCustSearching(false); })
+        .catch(() => setCustSearching(false));
+    }, 180);
+    return () => clearTimeout(t);
+  }, [custSearch, custDropOpen]);
 
   // Focus search when bill becomes active
   useEffect(() => { setTimeout(() => searchRef.current?.focus(), 80); }, [billId]);
@@ -783,19 +810,66 @@ function SingleBillWorkspace({
         <div className="pos-right">
           <div className="checkout-panel">
 
-            {/* CUSTOMER */}
+            {/* CUSTOMER SEARCH */}
             <div className="co-block">
               <div className="co-block-label">Customer</div>
-              <div className="co-cust-row">
-                <select className="co-cust-select" value={bill.customerId}
-                  onChange={e => onUpdate({ ...bill, customerId: e.target.value })}>
-                  <option value="">Walk-in Customer</option>
-                  {customers.map(c => <option key={c.id} value={c.id}>{c.name}{c.phone ? ` · ${c.phone}` : ''}</option>)}
-                </select>
-                <button className="co-cust-add" title="Add new customer (F4)" onClick={() => setShowAddCustModal(true)}>+</button>
-              </div>
-              {selectedCustomer && Number(selectedCustomer.creditBalance) > 0 && (
-                <div className="co-credit-warn">⚠ Outstanding: ₹{money(selectedCustomer.creditBalance)}</div>
+              {bill.customerId && selectedCustomer ? (
+                <div className="cust-selected-card">
+                  <div className="cust-selected-info">
+                    <span className="cust-sel-name">{selectedCustomer.name}</span>
+                    {selectedCustomer.phone && <span className="cust-sel-phone">📞 {selectedCustomer.phone}</span>}
+                    {Number(selectedCustomer.creditBalance) > 0 && (
+                      <span className="cust-sel-credit">⚠ ₹{money(selectedCustomer.creditBalance)} due</span>
+                    )}
+                  </div>
+                  <button className="cust-sel-clear" title="Remove customer" onClick={() => { onUpdate({ ...bill, customerId: '' }); setCustSearch(''); }}>✕</button>
+                </div>
+              ) : (
+                <div className="cust-search-wrap" style={{ position: 'relative' }}>
+                  <div className="co-cust-row">
+                    <div style={{ flex: 1, position: 'relative' }}>
+                      <span className="cust-search-icon">🔍</span>
+                      <input
+                        ref={custRef}
+                        className="cust-search-input"
+                        type="text"
+                        placeholder="Search by name or phone…"
+                        value={custSearch}
+                        onChange={e => { setCustSearch(e.target.value); setCustDropOpen(true); }}
+                        onFocus={() => setCustDropOpen(true)}
+                        onBlur={() => setTimeout(() => setCustDropOpen(false), 200)}
+                        autoComplete="off"
+                      />
+                    </div>
+                    <button className="co-cust-add" title="Add new customer" onClick={() => setShowAddCustModal(true)}>+</button>
+                  </div>
+                  {custDropOpen && (
+                    <div className="cust-search-dropdown">
+                      {custSearching ? (
+                        <div className="cust-drop-loading">Searching…</div>
+                      ) : custResults.length === 0 ? (
+                        <div className="cust-drop-empty">
+                          <span>{custSearch ? `No customer found for "${custSearch}"` : 'Type to search customers'}</span>
+                          <button className="cust-drop-add" onMouseDown={() => { setNewCust({ name: custSearch, phone: '' }); setShowAddCustModal(true); setCustDropOpen(false); }}>+ Add New</button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="cust-drop-hint">Select a customer</div>
+                          {custResults.map(c => (
+                            <div key={c.id} className="cust-drop-item"
+                              onMouseDown={() => { onUpdate({ ...bill, customerId: c.id }); setCustDropOpen(false); setCustSearch(''); }}>
+                              <div className="cust-drop-name">{c.name}</div>
+                              <div className="cust-drop-meta">
+                                {c.phone && <span>📞 {c.phone}</span>}
+                                {Number(c.creditBalance) > 0 && <span className="cust-drop-credit">⚠ ₹{money(c.creditBalance)}</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
 
@@ -3435,6 +3509,115 @@ function Cashiers() {
   );
 }
 
+/*  QUICK ACCESS MANAGER  */
+function QuickAccessManager() {
+  const [items, setItems] = useState<any[]>([]);
+  const [prodSearch, setProdSearch] = useState('');
+  const [prodResults, setProdResults] = useState<Product[]>([]);
+  const [prodDropOpen, setProdDropOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [qaError, setQaError] = useState<unknown>();
+  const [qaSaved, setQaSaved] = useState('');
+
+  const load = () => api('/api/quick-access').then(setItems).catch(setQaError);
+  useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    if (!prodSearch.trim()) { setProdResults([]); return; }
+    const t = setTimeout(() => {
+      api(`/api/products?q=${encodeURIComponent(prodSearch.trim())}`).then(setProdResults).catch(() => {});
+    }, 200);
+    return () => clearTimeout(t);
+  }, [prodSearch]);
+
+  const addProduct = async (p: Product) => {
+    setAdding(true); setQaError(undefined);
+    try {
+      await api('/api/quick-access', { method: 'POST', body: JSON.stringify({ productId: p.id }) });
+      load(); setProdSearch(''); setProdResults([]); setProdDropOpen(false);
+      setQaSaved(`Added "${p.name}"`); setTimeout(() => setQaSaved(''), 2500);
+    } catch (e) { setQaError(e); }
+    setAdding(false);
+  };
+
+  const removeItem = async (id: string, name: string) => {
+    if (!confirm(`Remove "${name}" from Quick Access?`)) return;
+    try {
+      await api(`/api/quick-access/${id}`, { method: 'DELETE' });
+      load(); setQaSaved(`Removed "${name}"`); setTimeout(() => setQaSaved(''), 2500);
+    } catch (e) { setQaError(e); }
+  };
+
+  return (
+    <div className="panel" style={{ marginTop: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div>
+          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>⚡ Quick Access Products</h3>
+          <p style={{ margin: '3px 0 0', color: 'var(--text-muted)', fontSize: 12 }}>
+            These products appear as one-tap chips on the billing screen ({items.length}/16 configured)
+          </p>
+        </div>
+      </div>
+      <ErrorState error={qaError} />
+      {qaSaved && <div className="success" style={{ marginBottom: 8, fontSize: 12 }}>{qaSaved}</div>}
+      <div style={{ position: 'relative', marginBottom: 14 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ flex: 1, position: 'relative' }}>
+            <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', fontSize: 14, color: 'var(--text-muted)', pointerEvents: 'none' }}>🔍</span>
+            <input
+              style={{ width: '100%', padding: '8px 12px 8px 32px', border: '1px solid var(--border)', borderRadius: 7, fontSize: 13, background: 'var(--bg)', color: 'var(--text)', outline: 'none', boxSizing: 'border-box' }}
+              placeholder="Search product by name or barcode to add…"
+              value={prodSearch}
+              onChange={e => { setProdSearch(e.target.value); setProdDropOpen(true); }}
+              onFocus={() => setProdDropOpen(true)}
+              onBlur={() => setTimeout(() => setProdDropOpen(false), 200)}
+              disabled={items.length >= 16}
+            />
+          </div>
+          {items.length >= 16 && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Max 16 reached</span>}
+        </div>
+        {prodDropOpen && prodResults.length > 0 && (
+          <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50, background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,.18)', maxHeight: 260, overflowY: 'auto', marginTop: 4 }}>
+            {prodResults.map(p => (
+              <div key={p.id}
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border)', fontSize: 13 }}
+                onMouseDown={() => addProduct(p)}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg)')}
+                onMouseLeave={e => (e.currentTarget.style.background = '')}>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{p.name}</div>
+                  <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>SKU: {p.sku} · Stock: {p.stock} · ₹{money(p.sellingPrice)}</div>
+                </div>
+                <button style={{ background: 'var(--brand)', color: '#fff', border: 'none', borderRadius: 5, padding: '3px 10px', cursor: 'pointer', fontSize: 12, opacity: adding ? 0.6 : 1 }} disabled={adding}>+ Add</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {items.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-muted)', fontSize: 13 }}>
+          No quick-access products configured. Search and add products above.
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8 }}>
+          {items.map((item, idx) => (
+            <div key={item.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', background: 'var(--bg)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.product?.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>₹{money(item.product?.sellingPrice)} · {item.product?.stock} in stock</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Order #{idx + 1}</div>
+              </div>
+              <button onClick={() => removeItem(item.id, item.product?.name)}
+                style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 7px', fontSize: 14, flexShrink: 0 }}
+                title="Remove">✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /*  SETTINGS  */
 function Settings({ onNavigate }: { onNavigate?: (page: string) => void }) {
   const [shop, setShop] = useState<any>(); const [error, setError] = useState<unknown>(); const [saved, setSaved] = useState(false);
@@ -3467,6 +3650,8 @@ function Settings({ onNavigate }: { onNavigate?: (page: string) => void }) {
         <Field label="Email" type="email" value={shop.email || ""} onChange={(e: any) => setShop({ ...shop, email: e.target.value })} />
         <Button className="primary">Save Settings</Button>
       </form>
+
+      <QuickAccessManager />
     </Page>
   );
 }

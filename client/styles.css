@@ -1,4 +1,4 @@
-﻿@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 /* â•â•â• DESIGN TOKENS â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 :root {
@@ -431,6 +431,32 @@ select.input{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w
 .co-cust-add{border:1px solid #d4dad7;border-radius:6px;background:#fff;color:#4a5e56;cursor:pointer;width:28px;height:28px;display:grid;place-items:center;font-size:16px;flex-shrink:0;transition:all .1s}
 .co-cust-add:hover{background:#e8f5ee;border-color:#1a8a5c;color:#155a3e}
 .co-credit-warn{margin-top:5px;font-size:10px;font-weight:700;color:#922b21;background:#fce8e6;border-radius:3px;padding:3px 8px;display:flex;align-items:center;gap:4px}
+/* Customer Search Input */
+.cust-search-input{width:100%;padding:6px 10px 6px 28px;border:1px solid #d4dad7;border-radius:6px;font:500 12px inherit;color:#1a2420;background:#fff;outline:none;box-sizing:border-box;transition:border-color .15s}
+.cust-search-input:focus{border-color:#c1874b;box-shadow:0 0 0 2px rgba(193,135,75,.1)}
+.cust-search-icon{position:absolute;left:9px;top:50%;transform:translateY(-50%);font-size:11px;pointer-events:none;opacity:.5}
+/* Customer Search Dropdown */
+.cust-search-dropdown{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:200;background:#fff;border:1px solid #d4dad7;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.14);max-height:240px;overflow-y:auto}
+.cust-drop-hint{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#9aada6;padding:6px 12px 3px}
+.cust-drop-item{display:flex;flex-direction:column;gap:2px;padding:8px 12px;cursor:pointer;border-bottom:1px solid #eef0ec;transition:background .1s}
+.cust-drop-item:last-child{border-bottom:none}
+.cust-drop-item:hover{background:#f0f7f3}
+.cust-drop-name{font-size:12px;font-weight:600;color:#1a2420}
+.cust-drop-meta{font-size:10px;color:#7a8e86;display:flex;gap:8px}
+.cust-drop-credit{color:#c0392b;font-weight:700}
+.cust-drop-loading{padding:12px;text-align:center;font-size:11px;color:#9aada6}
+.cust-drop-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px;font-size:11px;color:#9aada6;text-align:center}
+.cust-drop-add{border:1px solid #1a8a5c;border-radius:5px;background:#e8f5ee;color:#155a3e;font-size:11px;font-weight:600;padding:4px 10px;cursor:pointer;transition:all .1s}
+.cust-drop-add:hover{background:#1a8a5c;color:#fff}
+/* Selected Customer Card */
+.cust-selected-card{display:flex;align-items:center;gap:6px;background:#f0f7f3;border:1px solid #c8e0d0;border-radius:7px;padding:6px 10px}
+.cust-selected-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.cust-sel-name{font-size:12px;font-weight:700;color:#1a2420;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cust-sel-phone{font-size:10px;color:#4a5e56}
+.cust-sel-credit{font-size:10px;font-weight:700;color:#c0392b}
+.cust-sel-clear{background:none;border:none;color:#7a8e86;cursor:pointer;font-size:14px;padding:2px 4px;border-radius:4px;flex-shrink:0;line-height:1;transition:all .1s}
+.cust-sel-clear:hover{background:#fce8e6;color:#922b21}
+
 
 /* Summary - scrollable */
 .co-summary-block{flex:1;overflow-y:auto;display:flex;flex-direction:column;background:#fafbfa}

@@ -287,6 +287,32 @@ app.delete("/api/products/:id", auth, perm("PRODUCT_DELETE"), async (req, res) =
 
 
 /* ── Customers & Khata (Credit Ledger) API ──────────────── */
+app.get("/api/customers/search", auth, perm("CUSTOMER_VIEW"), async (req, res) => {
+  const shopId = getAuth(req).shopId;
+  const q = String(req.query.q || "").trim();
+  if (!q) {
+    const defaultCusts = await db.customer.findMany({
+      where: { shopId },
+      orderBy: { createdAt: "desc" },
+      take: 20
+    });
+    return res.json(defaultCusts);
+  }
+
+  const customers = await db.customer.findMany({
+    where: {
+      shopId,
+      OR: [
+        { name: { contains: q } },
+        { phone: { contains: q } }
+      ]
+    },
+    orderBy: { name: "asc" },
+    take: 30
+  });
+  res.json(customers);
+});
+
 app.get("/api/customers", auth, perm("CUSTOMER_VIEW"), async (req, res) => {
   res.json(await db.customer.findMany({
     where: { shopId: getAuth(req).shopId },
@@ -297,9 +323,102 @@ app.get("/api/customers", auth, perm("CUSTOMER_VIEW"), async (req, res) => {
 
 app.post("/api/customers", auth, perm("CUSTOMER_CREATE"), async (req, res) => {
   const a = getAuth(req);
-  const p = z.object({ name: z.string().min(1), phone: z.string().optional(), email: z.string().email().optional(), address: z.string().optional(), gstin: z.string().optional() }).safeParse(req.body);
-  if (!p.success) return res.status(400).json({ error: "Invalid customer data" });
-  res.status(201).json(await db.customer.create({ data: { ...p.data, shopId: a.shopId } }));
+  const p = z.object({
+    name: z.string().min(1, "Name is required"),
+    phone: z.string().optional(),
+    email: z.string().email().optional().or(z.literal("")),
+    address: z.string().optional(),
+    gstin: z.string().optional(),
+    creditLimit: z.coerce.number().min(0).optional()
+  }).safeParse(req.body);
+
+  if (!p.success) return res.status(400).json({ error: "Invalid customer data: " + p.error.errors.map(e => e.message).join(", ") });
+  
+  if (p.data.phone && p.data.phone.trim()) {
+    const existing = await db.customer.findFirst({
+      where: { shopId: a.shopId, phone: p.data.phone.trim() }
+    });
+    if (existing) {
+      return res.status(400).json({ error: `Customer with phone ${p.data.phone} already exists (${existing.name})` });
+    }
+  }
+
+  const cust = await db.customer.create({
+    data: {
+      name: p.data.name,
+      phone: p.data.phone?.trim() || null,
+      email: p.data.email?.trim() || null,
+      address: p.data.address?.trim() || null,
+      gstin: p.data.gstin?.trim() || null,
+      shopId: a.shopId
+    }
+  });
+  res.status(201).json(cust);
+});
+
+/* ── Quick Access Products API ─────────────────────────── */
+app.get("/api/quick-access", auth, perm("POS_ACCESS"), async (req, res) => {
+  const shopId = getAuth(req).shopId;
+  const items = await db.quickAccessProduct.findMany({
+    where: { shopId },
+    include: { product: true },
+    orderBy: { displayOrder: "asc" }
+  });
+  res.json(items);
+});
+
+app.post("/api/quick-access", auth, perm("SETTINGS_VIEW"), async (req, res) => {
+  const shopId = getAuth(req).shopId;
+  const p = z.object({
+    productId: z.string().min(1),
+    badgeText: z.string().optional(),
+    badgeColor: z.string().optional()
+  }).safeParse(req.body);
+
+  if (!p.success) return res.status(400).json({ error: "Product ID required" });
+
+  const count = await db.quickAccessProduct.count({ where: { shopId } });
+  
+  const item = await db.quickAccessProduct.upsert({
+    where: { shopId_productId: { shopId, productId: p.data.productId } },
+    create: {
+      shopId,
+      productId: p.data.productId,
+      displayOrder: count,
+      badgeText: p.data.badgeText || null,
+      badgeColor: p.data.badgeColor || null
+    },
+    update: {
+      badgeText: p.data.badgeText || null,
+      badgeColor: p.data.badgeColor || null
+    },
+    include: { product: true }
+  });
+  res.json(item);
+});
+
+app.post("/api/quick-access/reorder", auth, perm("SETTINGS_VIEW"), async (req, res) => {
+  const shopId = getAuth(req).shopId;
+  const p = z.object({ productIds: z.array(z.string()) }).safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "Array of productIds required" });
+
+  await db.$transaction(
+    p.data.productIds.map((pid, idx) =>
+      db.quickAccessProduct.updateMany({
+        where: { shopId, productId: pid },
+        data: { displayOrder: idx }
+      })
+    )
+  );
+  res.json({ ok: true });
+});
+
+app.delete("/api/quick-access/:id", auth, perm("SETTINGS_VIEW"), async (req, res) => {
+  const shopId = getAuth(req).shopId;
+  await db.quickAccessProduct.deleteMany({
+    where: { id: String(req.params.id), shopId }
+  });
+  res.json({ ok: true });
 });
 
 app.patch("/api/customers/:id", auth, perm("CUSTOMER_EDIT"), async (req, res) => {
