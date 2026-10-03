@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -60,9 +60,15 @@ model Shop {
   auditLogs AuditLog[]
   expenseCategories ExpenseCategory[]
   invoiceCounters InvoiceCounter[]
+  customerCreditLedgers CustomerCreditLedger[]
+  shifts Shift[]
+  offers Offer[]
+  printerSettings PrinterSetting[]
+  receiptTemplates ReceiptTemplate[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
 model User {
   id String @id @default(cuid())
   shopId String
@@ -80,23 +86,29 @@ model User {
   expenses Expense[]
   auditLogs AuditLog[]
   idempotencyKeys IdempotencyKey[]
+  shifts Shift[]
+  customerCreditLedgers CustomerCreditLedger[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
 model Counter {
   id String @id @default(cuid())
   shopId String
   shop Shop @relation(fields: [shopId], references: [id])
   name String
   users User[]
+  shifts Shift[]
   createdAt DateTime @default(now())
 }
+
 model Permission {
   id String @id @default(cuid())
   code String @unique
   description String?
   users UserPermission[]
 }
+
 model UserPermission {
   id String @id @default(cuid())
   userId String
@@ -106,14 +118,21 @@ model UserPermission {
   enabled Boolean @default(true)
   @@unique([userId, permissionId])
 }
+
 model Category {
   id String @id @default(cuid())
   shopId String
   shop Shop @relation(fields: [shopId], references: [id])
   name String
-  products Product[]
+  parentId String?
+  parent Category? @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryHierarchy")
+  products Product[] @relation("MainCategory")
+  subProducts Product[] @relation("SubCategory")
+  offers Offer[]
   @@unique([shopId, name])
 }
+
 model Product {
   id String @id @default(cuid())
   shopId String
@@ -131,19 +150,29 @@ model Product {
   stock Decimal @default(0)
   minimumStock Decimal @default(0)
   categoryId String?
-  category Category? @relation(fields: [categoryId], references: [id])
+  category Category? @relation("MainCategory", fields: [categoryId], references: [id])
+  subcategoryId String?
+  subCategory Category? @relation("SubCategory", fields: [subcategoryId], references: [id])
+  batchNumber String?
+  expiryDate DateTime?
+  supplierId String?
+  supplier Supplier? @relation(fields: [supplierId], references: [id])
+  imageUrl String?
   active Boolean @default(true)
   saleItems SaleItem[]
   purchaseItems PurchaseItem[]
   inventoryMovements InventoryMovement[]
   returnItems ReturnItem[]
+  offers Offer[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   @@unique([shopId, sku])
   @@unique([shopId, barcode])
   @@index([shopId, name])
   @@index([shopId, barcode])
+  @@index([shopId, brand])
 }
+
 model Customer {
   id String @id @default(cuid())
   shopId String
@@ -155,10 +184,12 @@ model Customer {
   gstin String?
   creditBalance Decimal @default(0)
   sales Sale[]
+  creditLedgers CustomerCreditLedger[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   @@index([shopId, phone])
 }
+
 model Supplier {
   id String @id @default(cuid())
   shopId String
@@ -170,9 +201,11 @@ model Supplier {
   gstin String?
   payableBalance Decimal @default(0)
   purchases Purchase[]
+  products Product[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
 model Sale {
   id String @id @default(cuid())
   shopId String
@@ -191,11 +224,13 @@ model Sale {
   items SaleItem[]
   payments Payment[]
   returns SaleReturn[]
+  creditLedgers CustomerCreditLedger[]
   createdAt DateTime @default(now())
   @@unique([shopId, invoiceNumber])
   @@unique([shopId, idempotencyKey])
   @@index([shopId, createdAt])
 }
+
 model SaleItem {
   id String @id @default(cuid())
   saleId String
@@ -210,6 +245,7 @@ model SaleItem {
   total Decimal
   returnItems ReturnItem[]
 }
+
 model Payment {
   id String @id @default(cuid())
   saleId String
@@ -218,6 +254,7 @@ model Payment {
   amount Decimal
   createdAt DateTime @default(now())
 }
+
 model Purchase {
   id String @id @default(cuid())
   shopId String
@@ -230,6 +267,7 @@ model Purchase {
   createdAt DateTime @default(now())
   @@unique([shopId, invoiceNumber])
 }
+
 model PurchaseItem {
   id String @id @default(cuid())
   purchaseId String
@@ -240,6 +278,7 @@ model PurchaseItem {
   unitPrice Decimal
   total Decimal
 }
+
 model SaleReturn {
   id String @id @default(cuid())
   shopId String
@@ -254,6 +293,7 @@ model SaleReturn {
   items ReturnItem[]
   createdAt DateTime @default(now())
 }
+
 model ReturnItem {
   id String @id @default(cuid())
   returnId String
@@ -265,6 +305,7 @@ model ReturnItem {
   quantity Decimal
   amount Decimal
 }
+
 model InventoryMovement {
   id String @id @default(cuid())
   shopId String
@@ -279,6 +320,7 @@ model InventoryMovement {
   createdAt DateTime @default(now())
   @@index([shopId, productId, createdAt])
 }
+
 model ExpenseCategory {
   id String @id @default(cuid())
   shopId String
@@ -287,6 +329,7 @@ model ExpenseCategory {
   expenses Expense[]
   @@unique([shopId, name])
 }
+
 model Expense {
   id String @id @default(cuid())
   shopId String
@@ -300,6 +343,7 @@ model Expense {
   description String?
   createdAt DateTime @default(now())
 }
+
 model AuditLog {
   id String @id @default(cuid())
   shopId String
@@ -335,3 +379,176 @@ model IdempotencyKey {
   @@unique([shopId, operation, key])
   @@index([shopId, createdAt])
 }
+
+model CustomerCreditLedger {
+  id String @id @default(cuid())
+  shopId String
+  shop Shop @relation(fields: [shopId], references: [id])
+  customerId String
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  saleId String?
+  sale Sale? @relation(fields: [saleId], references: [id])
+  userId String?
+  user User? @relation(fields: [userId], references: [id])
+  type String // CREDIT_GIVEN | PAYMENT_RECEIVED
+  amount Decimal
+  notes String?
+  createdAt DateTime @default(now())
+  @@index([shopId, customerId, createdAt])
+}
+
+model Shift {
+  id String @id @default(cuid())
+  shopId String
+  shop Shop @relation(fields: [shopId], references: [id])
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  counterId String?
+  counter Counter? @relation(fields: [counterId], references: [id])
+  startTime DateTime @default(now())
+  endTime DateTime?
+  openingCash Decimal @default(0)
+  cashSales Decimal @default(0)
+  cashRefunds Decimal @default(0)
+  cashExpenses Decimal @default(0)
+  expectedCash Decimal @default(0)
+  actualCash Decimal?
+  difference Decimal?
+  notes String?
+  status String @default("OPEN")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([shopId, userId, status])
+}
+
+model Offer {
+  id String @id @default(cuid())
+  shopId String
+  shop Shop @relation(fields: [shopId], references: [id])
+  name String
+  code String?
+  type String // PERCENTAGE | FIXED | BUY_X_GET_Y | MIN_BILL
+  value Decimal @default(0)
+  minBillAmount Decimal?
+  buyQty Int?
+  getQty Int?
+  categoryId String?
+  category Category? @relation(fields: [categoryId], references: [id])
+  productId String?
+  product Product? @relation(fields: [productId], references: [id])
+  active Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([shopId, active])
+}
+
+model PrinterSetting {
+  id String @id @default(cuid())
+  shopId String
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  counterId String?
+  printerName String @default("Default Thermal Printer")
+  paperWidth String @default("80mm")
+  copies Int @default(1)
+  autoPrint Boolean @default(true)
+  cutPaper Boolean @default(true)
+  openCashDrawer Boolean @default(false)
+
+  // Header Customization
+  shopName String?
+  tagline String?
+  address String?
+  phone String?
+  email String?
+  gstin String?
+  website String?
+  additionalHeader String?
+
+  // Logo
+  logoUrl String?
+  showLogo Boolean @default(true)
+  logoAlign String @default("center")
+
+  // Header Options
+  showShopName Boolean @default(true)
+  showTagline Boolean @default(true)
+  showAddress Boolean @default(true)
+  showPhone Boolean @default(true)
+  showGstin Boolean @default(true)
+  showEmail Boolean @default(false)
+  showWebsite Boolean @default(false)
+  headerAlign String @default("center")
+
+  // Item Columns
+  showProductName Boolean @default(true)
+  showQuantity Boolean @default(true)
+  showRate Boolean @default(true)
+  showDiscount Boolean @default(true)
+  showTax Boolean @default(true)
+  showTotal Boolean @default(true)
+  showSku Boolean @default(false)
+  showBarcode Boolean @default(false)
+
+  // Bill Info Options
+  showInvoiceNum Boolean @default(true)
+  showDate Boolean @default(true)
+  showTime Boolean @default(true)
+  showCounterNum Boolean @default(true)
+  showCashierName Boolean @default(true)
+  showCustomerName Boolean @default(true)
+  showCustomerPhone Boolean @default(false)
+  showCustomerGstin Boolean @default(false)
+
+  // Bill Summary Options
+  showSubtotal Boolean @default(true)
+  showSummaryDiscount Boolean @default(true)
+  showGstTax Boolean @default(true)
+  showOtherCharges Boolean @default(false)
+  showGrandTotal Boolean @default(true)
+
+  // Payment Info Options
+  showPaymentMethod Boolean @default(true)
+  showAmountReceived Boolean @default(true)
+  showChangeReturned Boolean @default(true)
+  showTransactionRef Boolean @default(false)
+
+  // Footer
+  thankYouMessage String? @default("Thank You For Shopping With Us!")
+  additionalFooter String? @default("Visit Again")
+  returnPolicy String? @default("Goods once sold cannot be returned without valid bill.")
+  customerSupport String?
+  showThankYou Boolean @default(true)
+  showReturnPolicy Boolean @default(true)
+  showAdditionalFooter Boolean @default(true)
+  footerAlign String @default("center")
+
+  // Barcode / QR Code
+  showQrCode Boolean @default(false)
+  qrTargetUrl String?
+  showInvoiceBarcode Boolean @default(true)
+
+  // Appearance
+  fontSize String @default("medium")
+  shopNameSize String @default("large")
+  shopNameStyle String @default("bold")
+  itemTextStyle String @default("normal")
+  dividerStyle String @default("dashed")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shopId, counterId])
+}
+
+model ReceiptTemplate {
+  id String @id @default(cuid())
+  shopId String
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name String
+  paperWidth String @default("80mm")
+  configuration String
+  isDefault Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
