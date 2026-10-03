@@ -646,15 +646,470 @@ app.post("/api/purchases", auth, perm("PURCHASE_CREATE"), async (req, res) => {
   } catch (e: any) { res.status(400).json({ error: e.message || "Purchase failed" }); }
 });
 
-/* ── Sales / Billing POS API ────────────────────────────── */
+/* ── Sales / Bills POS API ────────────────────────────── */
+app.get("/api/bills", auth, perm("BILL_VIEW"), async (req, res) => {
+  const a = getAuth(req);
+  const q = String(req.query.q || "").trim();
+  const dateFilter = String(req.query.dateFilter || "all");
+  const startDateStr = req.query.startDate ? String(req.query.startDate) : null;
+  const endDateStr = req.query.endDate ? String(req.query.endDate) : null;
+  const paymentMethod = req.query.paymentMethod ? String(req.query.paymentMethod) : "ALL";
+  const status = req.query.status ? String(req.query.status) : "ALL";
+  const cashierId = req.query.cashierId ? String(req.query.cashierId) : "";
+  const counterId = req.query.counterId ? String(req.query.counterId) : "";
+  const page = Math.max(1, parseInt(String(req.query.page || "1")) || 1);
+  const limit = Math.min(200, Math.max(5, parseInt(String(req.query.limit || "50")) || 50));
+
+  const where: any = { shopId: a.shopId };
+
+  if (status !== "ALL") {
+    if (status === "MODIFIED") {
+      const editedLogs = await db.auditLog.findMany({
+        where: { shopId: a.shopId, entity: "Sale", action: "SALE_EDITED" },
+        select: { entityId: true }
+      });
+      const ids = Array.from(new Set(editedLogs.map(l => l.entityId).filter(Boolean) as string[]));
+      where.id = { in: ids };
+    } else {
+      where.status = status;
+    }
+  }
+
+  if (cashierId) where.cashierId = cashierId;
+  if (counterId) where.cashier = { counterId: counterId };
+
+  if (paymentMethod !== "ALL") {
+    where.payments = { some: { method: paymentMethod as PaymentMethod } };
+  }
+
+  if (q) {
+    where.OR = [
+      { invoiceNumber: { contains: q } },
+      { customer: { name: { contains: q } } },
+      { customer: { phone: { contains: q } } },
+      { cashier: { name: { contains: q } } }
+    ];
+  }
+
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfWeek = new Date(startOfToday);
+  startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  if (dateFilter === "today") {
+    where.createdAt = { gte: startOfToday };
+  } else if (dateFilter === "yesterday") {
+    const startOfYesterday = new Date(startOfToday);
+    startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+    const endOfYesterday = new Date(startOfToday);
+    where.createdAt = { gte: startOfYesterday, lt: endOfYesterday };
+  } else if (dateFilter === "this_week") {
+    where.createdAt = { gte: startOfWeek };
+  } else if (dateFilter === "this_month") {
+    where.createdAt = { gte: startOfMonth };
+  } else if (startDateStr || endDateStr) {
+    const dateRange: any = {};
+    if (startDateStr) dateRange.gte = new Date(startDateStr);
+    if (endDateStr) {
+      const endD = new Date(endDateStr);
+      endD.setHours(23, 59, 59, 999);
+      dateRange.lte = endD;
+    }
+    where.createdAt = dateRange;
+  }
+
+  const todayCount = await db.sale.count({ where: { shopId: a.shopId, status: "COMPLETED", createdAt: { gte: startOfToday } } });
+  const weekCount = await db.sale.count({ where: { shopId: a.shopId, status: "COMPLETED", createdAt: { gte: startOfWeek } } });
+  const monthCount = await db.sale.count({ where: { shopId: a.shopId, status: "COMPLETED", createdAt: { gte: startOfMonth } } });
+  const todaySalesAggr = await db.sale.aggregate({ where: { shopId: a.shopId, status: "COMPLETED", createdAt: { gte: startOfToday } }, _sum: { total: true } });
+
+  const filteredSalesAggr = await db.sale.aggregate({ where, _sum: { total: true }, _count: { id: true } });
+  const totalCount = filteredSalesAggr._count.id;
+  const totalPages = Math.ceil(totalCount / limit) || 1;
+
+  const sales = await db.sale.findMany({
+    where,
+    include: {
+      cashier: { select: { id: true, name: true, counterId: true, counter: { select: { id: true, name: true } } } },
+      customer: { select: { id: true, name: true, phone: true, email: true, gstin: true, address: true, creditBalance: true } },
+      payments: true,
+      items: { include: { product: { select: { id: true, name: true, sku: true, barcode: true, sellingPrice: true, purchasePrice: true } } } },
+      returns: { include: { items: true } }
+    },
+    orderBy: { createdAt: "desc" },
+    skip: (page - 1) * limit,
+    take: limit
+  });
+
+  const saleIds = sales.map(s => s.id);
+  const editLogs = await db.auditLog.findMany({
+    where: { shopId: a.shopId, entity: "Sale", action: "SALE_EDITED", entityId: { in: saleIds } },
+    select: { entityId: true, createdAt: true, metadata: true }
+  });
+  const editMap = new Set(editLogs.map(l => l.entityId));
+
+  const enrichedSales = sales.map(s => ({
+    ...s,
+    isEdited: editMap.has(s.id),
+    editCount: editLogs.filter(l => l.entityId === s.id).length
+  }));
+
+  res.json({
+    stats: {
+      todayCount,
+      weekCount,
+      monthCount,
+      todaySales: Number(todaySalesAggr._sum.total || 0),
+      filteredSales: Number(filteredSalesAggr._sum.total || 0),
+      filteredCount: totalCount
+    },
+    sales: enrichedSales,
+    page,
+    limit,
+    totalPages,
+    totalCount
+  });
+});
+
 app.get("/api/sales", auth, perm("BILL_VIEW"), async (req, res) => {
   const a = getAuth(req);
-  res.json(await db.sale.findMany({
-    where: { shopId: a.shopId },
+  if (!Object.keys(req.query).length) {
+    return res.json(await db.sale.findMany({
+      where: { shopId: a.shopId },
+      include: { cashier: { select: { name: true } }, customer: { select: { name: true } }, payments: true, items: { include: { product: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 200
+    }));
+  }
+  const q = String(req.query.q || "").trim();
+  const sales = await db.sale.findMany({
+    where: {
+      shopId: a.shopId,
+      OR: q ? [{ invoiceNumber: { contains: q } }, { customer: { name: { contains: q } } }] : undefined
+    },
     include: { cashier: { select: { name: true } }, customer: { select: { name: true } }, payments: true, items: { include: { product: true } } },
     orderBy: { createdAt: "desc" },
     take: 200
-  }));
+  });
+  res.json(sales);
+});
+
+app.get("/api/bills/:id", auth, perm("BILL_VIEW"), async (req, res) => {
+  const a = getAuth(req);
+  const id = String(req.params.id);
+
+  const sale = await db.sale.findFirst({
+    where: { id, shopId: a.shopId },
+    include: {
+      cashier: { select: { id: true, name: true, email: true, counterId: true, counter: { select: { id: true, name: true } } } },
+      customer: { select: { id: true, name: true, phone: true, email: true, gstin: true, address: true, creditBalance: true } },
+      payments: true,
+      items: { include: { product: true } },
+      returns: { include: { user: { select: { name: true } }, items: { include: { product: true } } } }
+    }
+  });
+
+  if (!sale) return res.status(404).json({ error: "Bill not found" });
+
+  const auditLogs = await db.auditLog.findMany({
+    where: { shopId: a.shopId, entity: "Sale", entityId: sale.id },
+    include: { user: { select: { name: true, email: true } } },
+    orderBy: { createdAt: "desc" }
+  });
+
+  res.json({ ...sale, auditLogs });
+});
+
+app.put("/api/bills/:id", auth, perm("BILL_EDIT"), async (req, res) => {
+  const a = getAuth(req);
+  const id = String(req.params.id);
+
+  const p = z.object({
+    reason: z.string().min(3, "Reason for bill edit is mandatory"),
+    customerId: z.string().nullable().optional(),
+    discount: z.coerce.number().nonnegative().default(0),
+    items: z.array(z.object({
+      productId: z.string().min(1),
+      quantity: z.coerce.number().positive(),
+      unitPrice: z.coerce.number().nonnegative().optional()
+    })).min(1),
+    payments: z.array(z.object({
+      method: z.nativeEnum(PaymentMethod),
+      amount: z.coerce.number().positive()
+    })).min(1)
+  }).safeParse(req.body);
+
+  if (!p.success) return res.status(400).json({ error: "Invalid edit data: " + p.error.errors.map(e => e.message).join(", ") });
+
+  try {
+    const updatedSale = await db.$transaction(async tx => {
+      const existing = await tx.sale.findFirst({
+        where: { id, shopId: a.shopId },
+        include: { items: true, payments: true, customer: true }
+      });
+
+      if (!existing) throw Error("Bill not found");
+      if (existing.status === "CANCELLED") throw Error("Cannot edit a cancelled bill");
+
+      const merged = new Map<string, { quantity: number; unitPrice?: number }>();
+      for (const item of p.data.items) {
+        const cur = merged.get(item.productId);
+        if (cur) {
+          cur.quantity += item.quantity;
+        } else {
+          merged.set(item.productId, { quantity: item.quantity, unitPrice: item.unitPrice });
+        }
+      }
+
+      const lines: any[] = [];
+      let subtotal = new Prisma.Decimal(0);
+      let tax = new Prisma.Decimal(0);
+
+      for (const [productId, info] of merged) {
+        const product = await tx.product.findFirst({ where: { id: productId, shopId: a.shopId } });
+        if (!product) throw Error(`Product not found`);
+        const price = info.unitPrice !== undefined ? new Prisma.Decimal(info.unitPrice) : new Prisma.Decimal(product.sellingPrice);
+        const base = price.mul(info.quantity);
+        const t = base.mul(new Prisma.Decimal(product.taxRate)).div(100);
+        subtotal = subtotal.plus(base);
+        tax = tax.plus(t);
+        lines.push({ quantity: info.quantity, price, product, base, t });
+      }
+
+      const discount = new Prisma.Decimal(p.data.discount);
+      if (discount.gt(subtotal)) throw Error("Discount cannot exceed subtotal");
+      const total = subtotal.minus(discount).plus(tax);
+
+      const paid = p.data.payments.reduce((sum, item) => sum.plus(item.amount), new Prisma.Decimal(0));
+      if (paid.lt(total)) throw Error(`Payment total (${paid.toNumber().toFixed(2)}) is short of bill total (${total.toNumber().toFixed(2)})`);
+
+      const newCustId = p.data.customerId ?? null;
+      const hasCredit = p.data.payments.some(item => item.method === PaymentMethod.CREDIT);
+      if (hasCredit && !newCustId) throw Error("A customer is required for credit payments");
+
+      const oldQtyMap = new Map<string, number>();
+      for (const oldItem of existing.items) {
+        oldQtyMap.set(oldItem.productId, (oldQtyMap.get(oldItem.productId) || 0) + Number(oldItem.quantity));
+      }
+
+      const newQtyMap = new Map<string, number>();
+      for (const l of lines) {
+        newQtyMap.set(l.product.id, l.quantity);
+      }
+
+      const allProdIds = new Set([...oldQtyMap.keys(), ...newQtyMap.keys()]);
+
+      for (const prodId of allProdIds) {
+        const oldQty = oldQtyMap.get(prodId) || 0;
+        const newQty = newQtyMap.get(prodId) || 0;
+        const diff = newQty - oldQty;
+
+        if (diff > 0) {
+          const updated = await tx.product.updateMany({
+            where: { id: prodId, shopId: a.shopId, stock: { gte: diff } },
+            data: { stock: { decrement: diff } }
+          });
+          if (!updated.count) {
+            const prod = await tx.product.findUnique({ where: { id: prodId } });
+            throw Error(`Insufficient stock for ${prod?.name || prodId}`);
+          }
+          await tx.inventoryMovement.create({
+            data: {
+              shopId: a.shopId,
+              productId: prodId,
+              type: "SALE",
+              quantity: -diff,
+              referenceId: existing.id,
+              userId: a.userId,
+              reason: `Bill Edit (${existing.invoiceNumber}): ${p.data.reason}`
+            }
+          });
+        } else if (diff < 0) {
+          const returnQty = Math.abs(diff);
+          await tx.product.update({
+            where: { id: prodId },
+            data: { stock: { increment: returnQty } }
+          });
+          await tx.inventoryMovement.create({
+            data: {
+              shopId: a.shopId,
+              productId: prodId,
+              type: "ADJUSTMENT",
+              quantity: returnQty,
+              referenceId: existing.id,
+              userId: a.userId,
+              reason: `Bill Edit Restock (${existing.invoiceNumber}): ${p.data.reason}`
+            }
+          });
+        }
+      }
+
+      const oldCreditPaid = existing.payments.filter(p => p.method === PaymentMethod.CREDIT).reduce((sum, p) => sum + Number(p.amount), 0);
+      const newCreditPaid = p.data.payments.filter(p => p.method === PaymentMethod.CREDIT).reduce((sum, p) => sum + p.amount, 0);
+
+      if (existing.customerId && oldCreditPaid > 0) {
+        await tx.customer.update({
+          where: { id: existing.customerId },
+          data: { creditBalance: { decrement: oldCreditPaid } }
+        });
+      }
+
+      if (newCustId && newCreditPaid > 0) {
+        await tx.customer.update({
+          where: { id: newCustId },
+          data: { creditBalance: { increment: newCreditPaid } }
+        });
+        await tx.customerCreditLedger.create({
+          data: {
+            shopId: a.shopId,
+            customerId: newCustId,
+            saleId: existing.id,
+            userId: a.userId,
+            type: "CREDIT_GIVEN",
+            amount: newCreditPaid,
+            notes: `Amended Invoice ${existing.invoiceNumber}`
+          }
+        });
+      }
+
+      await tx.saleItem.deleteMany({ where: { saleId: existing.id } });
+      await tx.payment.deleteMany({ where: { saleId: existing.id } });
+
+      for (const l of lines) {
+        await tx.saleItem.create({
+          data: {
+            saleId: existing.id,
+            productId: l.product.id,
+            quantity: l.quantity,
+            unitPrice: l.price,
+            unitCost: l.product.purchasePrice,
+            tax: l.t,
+            total: l.base.plus(l.t)
+          }
+        });
+      }
+
+      for (const pm of p.data.payments) {
+        await tx.payment.create({
+          data: {
+            saleId: existing.id,
+            method: pm.method,
+            amount: pm.amount
+          }
+        });
+      }
+
+      const user = await tx.user.findUnique({ where: { id: a.userId } });
+
+      await tx.sale.update({
+        where: { id: existing.id },
+        data: {
+          subtotal,
+          discount,
+          tax,
+          total,
+          customerId: newCustId
+        }
+      });
+
+      await tx.auditLog.create({
+        data: {
+          shopId: a.shopId,
+          userId: a.userId,
+          action: "SALE_EDITED",
+          entity: "Sale",
+          entityId: existing.id,
+          metadata: {
+            reason: p.data.reason,
+            editorName: user?.name || "Admin",
+            previousTotal: Number(existing.total),
+            newTotal: total.toNumber(),
+            invoiceNumber: existing.invoiceNumber
+          }
+        }
+      });
+
+      return tx.sale.findUnique({
+        where: { id: existing.id },
+        include: {
+          cashier: { select: { name: true } },
+          customer: { select: { name: true, phone: true } },
+          payments: true,
+          items: { include: { product: true } }
+        }
+      });
+    });
+
+    res.json(updatedSale);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message || "Failed to update bill" });
+  }
+});
+
+app.post("/api/bills/:id/cancel", auth, perm("BILL_EDIT"), async (req, res) => {
+  const a = getAuth(req);
+  const id = String(req.params.id);
+  const p = z.object({ reason: z.string().min(3) }).safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "Mandatory cancellation reason required" });
+
+  try {
+    await db.$transaction(async tx => {
+      const sale = await tx.sale.findFirst({
+        where: { id, shopId: a.shopId },
+        include: { items: true, payments: true }
+      });
+      if (!sale) throw Error("Bill not found");
+      if (sale.status === "CANCELLED") throw Error("Bill is already cancelled");
+
+      for (const item of sale.items) {
+        await tx.product.update({
+          where: { id: item.productId },
+          data: { stock: { increment: item.quantity } }
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            shopId: a.shopId,
+            productId: item.productId,
+            type: "ADJUSTMENT",
+            quantity: item.quantity,
+            referenceId: sale.id,
+            userId: a.userId,
+            reason: `Bill Cancelled (${sale.invoiceNumber}): ${p.data.reason}`
+          }
+        });
+      }
+
+      const creditAmt = sale.payments.filter(p => p.method === PaymentMethod.CREDIT).reduce((s, p) => s + Number(p.amount), 0);
+      if (sale.customerId && creditAmt > 0) {
+        await tx.customer.update({
+          where: { id: sale.customerId },
+          data: { creditBalance: { decrement: creditAmt } }
+        });
+      }
+
+      await tx.sale.update({
+        where: { id: sale.id },
+        data: { status: "CANCELLED" }
+      });
+
+      const user = await tx.user.findUnique({ where: { id: a.userId } });
+      await tx.auditLog.create({
+        data: {
+          shopId: a.shopId,
+          userId: a.userId,
+          action: "SALE_CANCELLED",
+          entity: "Sale",
+          entityId: sale.id,
+          metadata: { reason: p.data.reason, invoiceNumber: sale.invoiceNumber, total: Number(sale.total), user: user?.name }
+        }
+      });
+    });
+
+    res.json({ ok: true });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message || "Failed to cancel bill" });
+  }
 });
 
 app.post("/api/sales", auth, perm("BILL_CREATE"), async (req, res) => {

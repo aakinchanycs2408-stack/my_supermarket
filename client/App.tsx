@@ -2168,51 +2168,843 @@ function Billing_Placeholder({ user }: { user?: User }) {
   );
 }
 
-/*  SALES HISTORY  */
-function Sales() {
-  const [rows, setRows] = useState<any[]>([]);
-  const [error, setError] = useState<unknown>();
-  const [search, setSearch] = useState("");
-  const load = () => api("/api/sales").then(setRows).catch(setError);
-  useEffect(() => { load(); }, []);
+/* ── BILLS MODULE ─────────────────────────────────────── */
 
-  const returnSale = async (sale: any) => {
-    const item = sale.items?.[0]; if (!item) return;
-    const reason = window.prompt("Reason for return"); if (!reason) return;
-    try {
-      await api("/api/returns", { method: "POST", body: JSON.stringify({ saleId: sale.id, reason, items: [{ saleItemId: item.id, quantity: 1 }] }) });
-      load();
-    } catch (e) { setError(e); }
-  };
+/* 1. BILL DETAIL MODAL */
+function BillDetailModal({
+  billId,
+  user,
+  onClose,
+  onRefresh,
+  onEdit,
+  onReturn
+}: {
+  billId: string;
+  user: User;
+  onClose: () => void;
+  onRefresh: () => void;
+  onEdit: (bill: any) => void;
+  onReturn: (bill: any) => void;
+}) {
+  const [bill, setBill] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>("");
 
-  const filtered = rows.filter(s => !search || s.invoiceNumber?.toLowerCase().includes(search.toLowerCase()) || s.customer?.name?.toLowerCase().includes(search.toLowerCase()) || s.cashier?.name?.toLowerCase().includes(search.toLowerCase()));
+  useEffect(() => {
+    setLoading(true);
+    api(`/api/bills/${billId}`)
+      .then(d => { setBill(d); setLoading(false); })
+      .catch(e => { setError(e.message || "Failed to load bill details"); setLoading(false); });
+  }, [billId]);
+
+  if (loading) {
+    return (
+      <div className="pay-modal-overlay" onClick={onClose}>
+        <div className="modal modal-lg" style={{ textAlign: "center", padding: 40 }}>
+          <div className="loading-spinner">Loading Bill Details...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !bill) {
+    return (
+      <div className="pay-modal-overlay" onClick={onClose}>
+        <div className="modal">
+          <h2>Bill Details</h2>
+          <div className="error">{error || "Bill not found"}</div>
+          <div className="modal-footer"><Button className="ghost" onClick={onClose}>Close</Button></div>
+        </div>
+      </div>
+    );
+  }
+
+  const isCompleted = bill.status === "COMPLETED";
+  const isReturned = bill.status === "RETURNED";
+  const isCancelled = bill.status === "CANCELLED";
+  const isAdmin = user.role === "ADMIN";
 
   return (
-    <Page title="Sales History" eyebrow="Operations" action={<Button className="primary" onClick={load}> Refresh</Button>}>
-      <ErrorState error={error} />
-      <article className="panel table-panel">
-        <div style={{ marginBottom: 10 }}>
-          <input className="input" placeholder="Search invoice, customer, cashier" value={search} onChange={e => setSearch(e.target.value)} />
+    <div className="pay-modal-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal modal-lg bill-detail-modal">
+        {/* Header */}
+        <div className="bdm-head">
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <h2 style={{ margin: 0, fontSize: 18 }}>Bill #{bill.invoiceNumber}</h2>
+              <span className={`badge ${isCompleted ? "success" : isReturned ? "warning" : "danger"}`}>
+                {bill.status}
+              </span>
+              {bill.auditLogs?.some((l: any) => l.action === "SALE_EDITED") && (
+                <span className="badge info" style={{ background: "#eef2ff", color: "#4f46e5" }}>
+                  ✏️ AMENDED / EDITED
+                </span>
+              )}
+            </div>
+            <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+              Created on {new Date(bill.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+            </p>
+          </div>
+          <button className="pay-close" onClick={onClose}>&#x2715;</button>
         </div>
-        <Table headers={["Invoice", "Cashier", "Customer", "Items", "Total", "Payment", "Date", "Status", ""]}>
-          {filtered.map(s => (
-            <tr key={s.id}>
-              <td><strong>{s.invoiceNumber}</strong></td>
-              <td>{s.cashier?.name}</td>
-              <td>{s.customer?.name || <span className="text-muted">Walk-in</span>}</td>
-              <td className="text-muted">{s.items?.length || 0}</td>
-              <td style={{ fontWeight: 700 }}>{money(s.total)}</td>
-              <td><span className="info-pill">{s.payments?.[0]?.method || ""}</span></td>
-              <td className="text-muted">{new Date(s.createdAt).toLocaleString()}</td>
-              <td><span className={`badge ${s.status === "RETURNED" ? "warning" : "success"}`}>{s.status}</span></td>
-              <td>{s.status !== "RETURNED" && <Button className="ghost" onClick={() => returnSale(s)}>Return</Button>}</td>
-            </tr>
-          ))}
-        </Table>
-        {filtered.length === 0 && <div className="empty">No sales found</div>}
+
+        {/* Info Grid */}
+        <div className="bdm-info-grid">
+          {/* Customer Info Card */}
+          <div className="bdm-card">
+            <div className="bdm-card-title">👤 Customer Information</div>
+            {bill.customer ? (
+              <div className="bdm-card-body">
+                <div><strong>{bill.customer.name}</strong></div>
+                {bill.customer.phone && <div>📞 {bill.customer.phone}</div>}
+                {bill.customer.gstin && <div>🏛️ GSTIN: {bill.customer.gstin}</div>}
+                {bill.customer.address && <div>📍 {bill.customer.address}</div>}
+                {Number(bill.customer.creditBalance) > 0 && (
+                  <div style={{ color: "var(--red)", fontSize: 11, fontWeight: 600, marginTop: 4 }}>
+                    Khata Credit Debt: {money(bill.customer.creditBalance)}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="bdm-card-body text-muted">Walk-in Customer</div>
+            )}
+          </div>
+
+          {/* Cashier & Register Card */}
+          <div className="bdm-card">
+            <div className="bdm-card-title">🧑‍💼 Cashier & Counter</div>
+            <div className="bdm-card-body">
+              <div><strong>{bill.cashier?.name || "Cashier"}</strong></div>
+              <div>Counter: <strong>{bill.cashier?.counter?.name || "Counter 1"}</strong></div>
+              <div style={{ fontSize: 11, color: "var(--text-3)", marginTop: 2 }}>
+                Email: {bill.cashier?.email || "N/A"}
+              </div>
+            </div>
+          </div>
+
+          {/* Payment Overview Card */}
+          <div className="bdm-card">
+            <div className="bdm-card-title">💵 Payment Breakdown</div>
+            <div className="bdm-card-body">
+              {bill.payments?.map((p: any) => (
+                <div key={p.id} style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                  <span className="info-pill">{p.method}</span>
+                  <strong>{money(p.amount)}</strong>
+                </div>
+              ))}
+              <div style={{ borderTop: "1px dashed #d0d8d4", paddingTop: 4, marginTop: 4, display: "flex", justifyContent: "space-between" }}>
+                <span>Grand Total:</span>
+                <strong style={{ fontSize: 14, color: "var(--teal)" }}>{money(bill.total)}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Line Items Table */}
+        <div style={{ marginTop: 14 }}>
+          <h3 style={{ fontSize: 13, marginBottom: 6, fontWeight: 700 }}>Line Items ({bill.items?.length || 0})</h3>
+          <Table headers={["#", "Product Name", "SKU / Barcode", "Qty", "Unit Price", "Tax", "Total"]}>
+            {bill.items?.map((item: any, idx: number) => {
+              const qty = Number(item.quantity);
+              const price = Number(item.unitPrice);
+              const tax = Number(item.tax || 0);
+              const total = Number(item.total);
+              return (
+                <tr key={item.id}>
+                  <td style={{ fontSize: 11, color: "var(--text-3)" }}>{idx + 1}</td>
+                  <td><strong>{item.product?.name || item.name}</strong></td>
+                  <td style={{ fontSize: 11, color: "var(--text-3)" }}>{item.product?.sku || item.sku || "-"}</td>
+                  <td><strong>{qty}</strong></td>
+                  <td>{money(price)}</td>
+                  <td style={{ fontSize: 11, color: "var(--text-3)" }}>{money(tax)}</td>
+                  <td style={{ fontWeight: 700 }}>{money(total)}</td>
+                </tr>
+              );
+            })}
+          </Table>
+        </div>
+
+        {/* Calculation Summary Footer */}
+        <div className="bdm-summary-box">
+          <div className="bdm-sum-col">
+            <span>Subtotal: <strong>{money(bill.subtotal)}</strong></span>
+            {Number(bill.discount) > 0 && <span>Discount: <strong style={{ color: "var(--green)" }}>-{money(bill.discount)}</strong></span>}
+            <span>Tax (GST): <strong>{money(bill.tax)}</strong></span>
+          </div>
+          <div className="bdm-total-box">
+            <span>TOTAL AMOUNT PAID</span>
+            <h2>{money(bill.total)}</h2>
+          </div>
+        </div>
+
+        {/* Audit & Modification Log Timeline */}
+        {bill.auditLogs && bill.auditLogs.length > 0 && (
+          <div className="bdm-audit-section">
+            <h3 style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+              📜 Audit History & Modification Trail
+            </h3>
+            <div className="audit-timeline">
+              {bill.auditLogs.map((log: any) => (
+                <div key={log.id} className="audit-event">
+                  <div className="ae-icon">
+                    {log.action === "SALE_CREATED" ? "🛒" : log.action === "SALE_EDITED" ? "✏️" : log.action === "SALE_CANCELLED" ? "❌" : "📝"}
+                  </div>
+                  <div className="ae-content">
+                    <div className="ae-title">
+                      <strong>{log.action.replace("SALE_", "BILL ")}</strong> by <span>{log.user?.name || log.metadata?.editorName || "System"}</span>
+                    </div>
+                    <div className="ae-time">
+                      {new Date(log.createdAt).toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                    </div>
+                    {log.metadata?.reason && (
+                      <div className="ae-reason">
+                        Reason: <em>"{log.metadata.reason}"</em>
+                      </div>
+                    )}
+                    {log.metadata?.previousTotal !== undefined && log.metadata?.newTotal !== undefined && (
+                      <div className="ae-diff">
+                        Amount adjusted: <span>{money(log.metadata.previousTotal)}</span> → <strong>{money(log.metadata.newTotal)}</strong>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="modal-footer" style={{ marginTop: 16, display: "flex", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", gap: 6 }}>
+            <Button className="primary" onClick={() => triggerReceiptPrint(bill)}>
+              🖨️ Reprint Thermal Receipt
+            </Button>
+            {isAdmin && !isCancelled && (
+              <Button className="ghost" style={{ background: "#fef3c7", color: "#92400e", border: "1px solid #fde68a" }} onClick={() => { onClose(); onEdit(bill); }}>
+                ✏️ Edit / Amend Bill
+              </Button>
+            )}
+            {!isCancelled && !isReturned && (
+              <Button className="ghost" style={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #ffedd5" }} onClick={() => { onClose(); onReturn(bill); }}>
+                🔄 Return / Refund Items
+              </Button>
+            )}
+          </div>
+          <Button className="ghost" onClick={onClose}>Close</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* 2. EDIT / AMEND BILL MODAL (ADMIN) */
+function BillEditModal({
+  bill,
+  user,
+  onClose,
+  onSaved
+}: {
+  bill: any;
+  user: User;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [items, setItems] = useState<any[]>(
+    (bill.items || []).map((i: any) => ({
+      productId: i.productId,
+      name: i.product?.name || i.name || "Product",
+      sku: i.product?.sku || i.sku || "",
+      sellingPrice: Number(i.unitPrice || i.product?.sellingPrice || 0),
+      taxRate: Number(i.product?.taxRate || 0),
+      quantity: Number(i.quantity || 1)
+    }))
+  );
+  const [discount, setDiscount] = useState<number>(Number(bill.discount || 0));
+  const [reason, setReason] = useState<string>("");
+  const [customerId, setCustomerId] = useState<string>(bill.customerId || "");
+  const [paymentMethod, setPaymentMethod] = useState<any>(bill.payments?.[0]?.method || "CASH");
+  const [allCustomers, setAllCustomers] = useState<Customer[]>([]);
+  const [prodSearch, setProdSearch] = useState<string>("");
+  const [prodResults, setProdResults] = useState<Product[]>([]);
+  const [error, setError] = useState<string>("");
+  const [submitting, setSubmitting] = useState<boolean>(false);
+
+  useEffect(() => {
+    api("/api/customers").then(setAllCustomers).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!prodSearch.trim()) { setProdResults([]); return; }
+    const timer = setTimeout(() => {
+      api(`/api/products?q=${encodeURIComponent(prodSearch)}`)
+        .then(setProdResults)
+        .catch(() => {});
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [prodSearch]);
+
+  const updateItemQty = (prodId: string, q: number) => {
+    if (q <= 0) {
+      setItems(items.filter(i => i.productId !== prodId));
+    } else {
+      setItems(items.map(i => i.productId === prodId ? { ...i, quantity: q } : i));
+    }
+  };
+
+  const updateItemPrice = (prodId: string, price: number) => {
+    setItems(items.map(i => i.productId === prodId ? { ...i, sellingPrice: price } : i));
+  };
+
+  const addProductToEdit = (p: Product) => {
+    const existing = items.find(i => i.productId === p.id);
+    if (existing) {
+      setItems(items.map(i => i.productId === p.id ? { ...i, quantity: i.quantity + 1 } : i));
+    } else {
+      setItems([...items, {
+        productId: p.id,
+        name: p.name,
+        sku: p.sku,
+        sellingPrice: p.sellingPrice,
+        taxRate: p.taxRate || 0,
+        quantity: 1
+      }]);
+    }
+    setProdSearch("");
+    setProdResults([]);
+  };
+
+  let subtotal = 0;
+  let tax = 0;
+  for (const i of items) {
+    const base = i.sellingPrice * i.quantity;
+    const t = (base * (i.taxRate || 0)) / 100;
+    subtotal += base;
+    tax += t;
+  }
+  const total = Math.max(0, subtotal - discount + tax);
+
+  const handleSave = async () => {
+    setError("");
+    if (!reason.trim() || reason.trim().length < 3) {
+      setError("Mandatory Reason for Edit is required (minimum 3 characters).");
+      return;
+    }
+    if (!items.length) {
+      setError("Bill must have at least 1 item.");
+      return;
+    }
+    if (paymentMethod === "CREDIT" && !customerId) {
+      setError("Customer selection is required for CREDIT payment method.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await api(`/api/bills/${bill.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          reason: reason.trim(),
+          customerId: customerId || null,
+          discount: Number(discount),
+          items: items.map(i => ({
+            productId: i.productId,
+            quantity: Number(i.quantity),
+            unitPrice: Number(i.sellingPrice)
+          })),
+          payments: [{
+            method: paymentMethod,
+            amount: Number(total)
+          }]
+        })
+      });
+      onSaved();
+      onClose();
+    } catch (e: any) {
+      setError(e.message || "Failed to update bill");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="pay-modal-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal modal-lg bill-edit-modal">
+        <div className="bdm-head">
+          <div>
+            <h2 style={{ margin: 0 }}>✏️ Edit / Amend Bill #{bill.invoiceNumber}</h2>
+            <p className="muted" style={{ fontSize: 11 }}>Modify items, quantities, or prices. Inventory and audit logs will be updated automatically.</p>
+          </div>
+          <button className="pay-close" onClick={onClose}>&#x2715;</button>
+        </div>
+
+        {error && <div className="error" style={{ marginBottom: 12 }}>{error}</div>}
+
+        {/* Add Product Search Input */}
+        <div style={{ marginBottom: 12, position: "relative" }}>
+          <label className="field">
+            <span>Add Product to Bill</span>
+            <input
+              className="input"
+              placeholder="Search product by name, SKU, barcode..."
+              value={prodSearch}
+              onChange={e => setProdSearch(e.target.value)}
+            />
+          </label>
+          {prodResults.length > 0 && (
+            <div className="co-cust-dropdown" style={{ top: "100%", left: 0, right: 0, zIndex: 10 }}>
+              {prodResults.map(p => (
+                <div key={p.id} className="co-cust-item" onClick={() => addProductToEdit(p)}>
+                  <div>
+                    <strong>{p.name}</strong> <small style={{ color: "var(--text-3)" }}>(SKU: {p.sku})</small>
+                  </div>
+                  <div>
+                    <strong>{money(p.sellingPrice)}</strong> <small>({p.stock} in stock)</small>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Items Table Editor */}
+        <div className="table-scroll" style={{ maxHeight: 220, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 6, marginBottom: 12 }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>Qty</th>
+                <th>Unit Price (₹)</th>
+                <th>Total (₹)</th>
+                <th>Remove</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map(item => (
+                <tr key={item.productId}>
+                  <td>
+                    <strong>{item.name}</strong>
+                    <div style={{ fontSize: 10, color: "var(--text-3)" }}>SKU: {item.sku}</div>
+                  </td>
+                  <td>
+                    <div className="bill-qty-ctrl">
+                      <button className="bill-qty-btn" onClick={() => updateItemQty(item.productId, item.quantity - 1)}>&#x2212;</button>
+                      <input
+                        className="bill-qty-input"
+                        type="number"
+                        min="1"
+                        value={item.quantity}
+                        onChange={e => updateItemQty(item.productId, parseInt(e.target.value) || 0)}
+                      />
+                      <button className="bill-qty-btn" onClick={() => updateItemQty(item.productId, item.quantity + 1)}>+</button>
+                    </div>
+                  </td>
+                  <td>
+                    <input
+                      className="input"
+                      type="number"
+                      step="0.01"
+                      style={{ width: 80, height: 28, fontSize: 12 }}
+                      value={item.sellingPrice}
+                      onChange={e => updateItemPrice(item.productId, parseFloat(e.target.value) || 0)}
+                    />
+                  </td>
+                  <td><strong>{money(item.sellingPrice * item.quantity)}</strong></td>
+                  <td style={{ textAlign: "center" }}>
+                    <button className="bill-remove" onClick={() => updateItemQty(item.productId, 0)}>&#x2715;</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Customer & Payment Options */}
+        <div className="form-grid-3" style={{ marginBottom: 12 }}>
+          <Select label="Customer" value={customerId} onChange={(e: any) => setCustomerId(e.target.value)}>
+            <option value="">Walk-in Customer</option>
+            {allCustomers.map(c => <option key={c.id} value={c.id}>{c.name} {c.phone ? `(${c.phone})` : ""}</option>)}
+          </Select>
+          <Select label="Payment Method" value={paymentMethod} onChange={(e: any) => setPaymentMethod(e.target.value)}>
+            <option value="CASH">CASH</option>
+            <option value="UPI">UPI</option>
+            <option value="CARD">CARD</option>
+            <option value="CREDIT">CREDIT (Khata)</option>
+          </Select>
+          <Field label="Discount (₹)" type="number" min="0" value={discount} onChange={(e: any) => setDiscount(parseFloat(e.target.value) || 0)} />
+        </div>
+
+        {/* Mandatory Reason Input */}
+        <div style={{ marginBottom: 14 }}>
+          <label className="field">
+            <span style={{ color: "var(--red)", fontWeight: 700 }}>* Mandatory Reason for Edit</span>
+            <textarea
+              className="input"
+              rows={2}
+              required
+              placeholder="e.g. Cashier error in quantity, item price override, items exchanged by customer..."
+              value={reason}
+              onChange={e => setReason(e.target.value)}
+            />
+          </label>
+        </div>
+
+        {/* New Totals Bar */}
+        <div className="bdm-summary-box">
+          <div>
+            <span>New Subtotal: <strong>{money(subtotal)}</strong></span>
+            <span>New Tax: <strong>{money(tax)}</strong></span>
+            <span>Original Total: <strong style={{ textDecoration: "line-through", color: "var(--text-3)" }}>{money(bill.total)}</strong></span>
+          </div>
+          <div className="bdm-total-box">
+            <span>NEW REVISED TOTAL</span>
+            <h2>{money(total)}</h2>
+          </div>
+        </div>
+
+        {/* Modal Footer */}
+        <div className="modal-footer" style={{ marginTop: 14 }}>
+          <Button className="ghost" onClick={onClose} disabled={submitting}>Cancel</Button>
+          <Button className="primary" onClick={handleSave} disabled={submitting}>
+            {submitting ? "Saving Amendment..." : "Save Bill Amendment"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* 3. MAIN BILLS MODULE WORKSTATION COMPONENT */
+function Bills({ user }: { user: User }) {
+  const [sales, setSales] = useState<any[]>([]);
+  const [stats, setStats] = useState<any>({ todayCount: 0, weekCount: 0, monthCount: 0, todaySales: 0, filteredSales: 0, filteredCount: 0 });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>();
+
+  // Pagination & Filters
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+
+  const [search, setSearch] = useState("");
+  const [dateFilter, setDateFilter] = useState("all");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("ALL");
+  const [status, setStatus] = useState("ALL");
+  const [cashierId, setCashierId] = useState("");
+  const [counterId, setCounterId] = useState("");
+
+  // Lookups
+  const [cashiers, setCashiers] = useState<any[]>([]);
+  const [counters, setCounters] = useState<any[]>([]);
+
+  // Modals
+  const [selectedBillId, setSelectedBillId] = useState<string | null>(null);
+  const [editingBill, setEditingBill] = useState<any | null>(null);
+  const [returningBill, setReturningBill] = useState<any | null>(null);
+
+  // Load cashiers and counters for filter dropdowns
+  useEffect(() => {
+    api("/api/cashiers").then(setCashiers).catch(() => {});
+    api("/api/counters").then(setCounters).catch(() => {});
+  }, []);
+
+  // Main data loader function
+  const loadBills = useCallback(() => {
+    setLoading(true);
+    const params = new URLSearchParams();
+    if (search.trim()) params.set("q", search.trim());
+    if (dateFilter) params.set("dateFilter", dateFilter);
+    if (startDate) params.set("startDate", startDate);
+    if (endDate) params.set("endDate", endDate);
+    if (paymentMethod !== "ALL") params.set("paymentMethod", paymentMethod);
+    if (status !== "ALL") params.set("status", status);
+    if (cashierId) params.set("cashierId", cashierId);
+    if (counterId) params.set("counterId", counterId);
+    params.set("page", String(page));
+    params.set("limit", "25");
+
+    api(`/api/bills?${params.toString()}`)
+      .then(res => {
+        setSales(res.sales || []);
+        setStats(res.stats || {});
+        setTotalPages(res.totalPages || 1);
+        setTotalCount(res.totalCount || 0);
+        setLoading(false);
+      })
+      .catch(err => {
+        setError(err);
+        setLoading(false);
+      });
+  }, [search, dateFilter, startDate, endDate, paymentMethod, status, cashierId, counterId, page]);
+
+  useEffect(() => {
+    loadBills();
+  }, [loadBills]);
+
+  // Debounced search trigger
+  const [searchInput, setSearchInput] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearch(searchInput);
+      setPage(1);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  return (
+    <Page
+      title="Bills & Workstation"
+      eyebrow="POS Audit & Ledger"
+      action={
+        <Button className="primary" onClick={loadBills}>
+          🔄 Refresh Bills
+        </Button>
+      }
+    >
+      <ErrorState error={error} />
+
+      {/* KPI Cards Header */}
+      <div className="bills-kpi-grid">
+        <div className="bills-kpi-card">
+          <div className="bk-title">Today's Bills</div>
+          <div className="bk-val">{stats.todayCount || 0}</div>
+          <div className="bk-sub">Completed transactions today</div>
+        </div>
+
+        <div className="bills-kpi-card">
+          <div className="bk-title">Weekly Bills</div>
+          <div className="bk-val">{stats.weekCount || 0}</div>
+          <div className="bk-sub">Bills generated this week</div>
+        </div>
+
+        <div className="bills-kpi-card">
+          <div className="bk-title">Monthly Bills</div>
+          <div className="bk-val">{stats.monthCount || 0}</div>
+          <div className="bk-sub">Total sales this month</div>
+        </div>
+
+        <div className="bills-kpi-card primary-card">
+          <div className="bk-title">Total Sales Revenue</div>
+          <div className="bk-val">₹{money(stats.filteredSales || stats.todaySales || 0)}</div>
+          <div className="bk-sub">Based on current filter parameters ({totalCount} bills)</div>
+        </div>
+      </div>
+
+      {/* Filter & Search Bar */}
+      <article className="panel" style={{ padding: 12, marginBottom: 14 }}>
+        <div className="bills-toolbar-grid">
+          {/* Search Box */}
+          <div style={{ flex: "1 1 240px" }}>
+            <input
+              className="input"
+              placeholder="🔍 Search Invoice #, Customer Name/Phone, Cashier..."
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value)}
+            />
+          </div>
+
+          {/* Date Range Selector */}
+          <div>
+            <select
+              className="input"
+              value={dateFilter}
+              onChange={e => { setDateFilter(e.target.value); setPage(1); }}
+            >
+              <option value="all">📅 All Time</option>
+              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
+              <option value="this_week">This Week</option>
+              <option value="this_month">This Month</option>
+              <option value="custom">Custom Range</option>
+            </select>
+          </div>
+
+          {/* Custom Date Pickers if custom selected */}
+          {dateFilter === "custom" && (
+            <>
+              <input type="date" className="input" value={startDate} onChange={e => setStartDate(e.target.value)} />
+              <input type="date" className="input" value={endDate} onChange={e => setEndDate(e.target.value)} />
+            </>
+          )}
+
+          {/* Payment Method Selector */}
+          <div>
+            <select className="input" value={paymentMethod} onChange={e => { setPaymentMethod(e.target.value); setPage(1); }}>
+              <option value="ALL">💵 All Payment Methods</option>
+              <option value="CASH">CASH</option>
+              <option value="UPI">UPI</option>
+              <option value="CARD">CARD</option>
+              <option value="CREDIT">CREDIT (Khata)</option>
+            </select>
+          </div>
+
+          {/* Status Selector */}
+          <div>
+            <select className="input" value={status} onChange={e => { setStatus(e.target.value); setPage(1); }}>
+              <option value="ALL">🏷️ All Statuses</option>
+              <option value="COMPLETED">COMPLETED</option>
+              <option value="RETURNED">RETURNED</option>
+              <option value="CANCELLED">CANCELLED</option>
+              <option value="MODIFIED">✏️ EDITED / AMENDED</option>
+            </select>
+          </div>
+
+          {/* Cashier Filter */}
+          {user.role === "ADMIN" && (
+            <div>
+              <select className="input" value={cashierId} onChange={e => { setCashierId(e.target.value); setPage(1); }}>
+                <option value="">👤 All Cashiers</option>
+                {cashiers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
       </article>
+
+      {/* Bills Table */}
+      <article className="panel table-panel">
+        <Table headers={["Invoice #", "Date & Time", "Customer", "Cashier / Counter", "Items", "Amount", "Payment Mode", "Status", "Actions"]}>
+          {sales.map((s: any) => {
+            const isCompleted = s.status === "COMPLETED";
+            const isReturned = s.status === "RETURNED";
+            const isCancelled = s.status === "CANCELLED";
+
+            return (
+              <tr key={s.id} className="bill-table-row">
+                <td>
+                  <button
+                    className="inv-link-btn"
+                    onClick={() => setSelectedBillId(s.id)}
+                    title="Click to view full bill details"
+                  >
+                    {s.invoiceNumber}
+                  </button>
+                </td>
+                <td style={{ fontSize: 11, color: "var(--text-2)" }}>
+                  {new Date(s.createdAt).toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                </td>
+                <td>
+                  {s.customer ? (
+                    <div>
+                      <strong>{s.customer.name}</strong>
+                      {s.customer.phone && <div style={{ fontSize: 10, color: "var(--text-3)" }}>📞 {s.customer.phone}</div>}
+                    </div>
+                  ) : (
+                    <span className="text-muted">Walk-in Customer</span>
+                  )}
+                </td>
+                <td>
+                  <div>
+                    <span>{s.cashier?.name || "Staff"}</span>
+                    {s.cashier?.counter?.name && (
+                      <span className="counter-pill">{s.cashier.counter.name}</span>
+                    )}
+                  </div>
+                </td>
+                <td>
+                  <strong>{s.items?.length || 0}</strong> <small style={{ color: "var(--text-3)" }}>items</small>
+                </td>
+                <td style={{ fontWeight: 700, fontSize: 13, color: "var(--teal)" }}>
+                  ₹{money(s.total)}
+                </td>
+                <td>
+                  <div style={{ display: "flex", gap: 3 }}>
+                    {s.payments?.map((p: any) => (
+                      <span key={p.id} className="info-pill">
+                        {p.method}
+                      </span>
+                    ))}
+                  </div>
+                </td>
+                <td>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    <span className={`badge ${isCompleted ? "success" : isReturned ? "warning" : "danger"}`}>
+                      {s.status}
+                    </span>
+                    {s.isEdited && (
+                      <span className="badge info" style={{ fontSize: 9 }}>
+                        ✏️ Edited ({s.editCount})
+                      </span>
+                    )}
+                  </div>
+                </td>
+                <td>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <Button className="ghost" style={{ padding: "4px 8px", fontSize: 11 }} onClick={() => setSelectedBillId(s.id)} title="View Bill Details">
+                      👁️ View
+                    </Button>
+                    <Button className="ghost" style={{ padding: "4px 8px", fontSize: 11 }} onClick={() => triggerReceiptPrint(s)} title="Reprint Thermal Bill">
+                      🖨️ Print
+                    </Button>
+                    {user.role === "ADMIN" && !isCancelled && (
+                      <Button className="ghost" style={{ padding: "4px 8px", fontSize: 11, color: "var(--amber-text)" }} onClick={() => setEditingBill(s)} title="Edit / Amend Bill">
+                        ✏️ Edit
+                      </Button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </Table>
+
+        {loading && (
+          <div className="empty" style={{ padding: 24 }}>Loading bills dataset...</div>
+        )}
+        {!loading && sales.length === 0 && (
+          <div className="empty" style={{ padding: 30 }}>
+            No bills found matching your criteria. Try adjusting the search or date filters.
+          </div>
+        )}
+
+        {/* Pagination Bar */}
+        {totalPages > 1 && (
+          <div className="pagination-bar" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", borderTop: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 12, color: "var(--text-2)" }}>
+              Page {page} of {totalPages} ({totalCount} total bills)
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <Button className="ghost" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+                ◀ Previous
+              </Button>
+              <Button className="ghost" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
+                Next ▶
+              </Button>
+            </div>
+          </div>
+        )}
+      </article>
+
+      {/* 1. Detail Modal */}
+      {selectedBillId && (
+        <BillDetailModal
+          billId={selectedBillId}
+          user={user}
+          onClose={() => setSelectedBillId(null)}
+          onRefresh={loadBills}
+          onEdit={b => setEditingBill(b)}
+          onReturn={b => setReturningBill(b)}
+        />
+      )}
+
+      {/* 2. Edit Modal */}
+      {editingBill && (
+        <BillEditModal
+          bill={editingBill}
+          user={user}
+          onClose={() => setEditingBill(null)}
+          onSaved={loadBills}
+        />
+      )}
     </Page>
   );
+}
+
+function Sales() {
+  return null;
 }
 
 /*  PRODUCTS CATALOGUE  */
@@ -3937,7 +4729,7 @@ type NavItem = { label: string; icon: string; section?: string; adminOnly?: bool
 const ADMIN_NAV: NavItem[] = [
   { label: "Dashboard", icon: "", section: "OPERATIONS" },
   { label: "Billing", icon: "" },
-  { label: "Sales", icon: "" },
+  { label: "Bills", icon: "🧾" },
   { label: "Products", icon: "", section: "CATALOGUE" },
   { label: "Categories", icon: "" },
   { label: "Inventory", icon: "" },
@@ -3958,7 +4750,7 @@ const ADMIN_NAV: NavItem[] = [
 const CASHIER_NAV: NavItem[] = [
   { label: "My Shift", icon: "", section: "SHIFT" },
   { label: "Billing", icon: "" },
-  { label: "Sales", icon: "" },
+  { label: "Bills", icon: "🧾" },
   { label: "Customers", icon: "", section: "CUSTOMERS" },
   { label: "Inventory", icon: "" },
   { label: "Shifts", icon: "" },
@@ -3993,7 +4785,8 @@ export default function App() {
     Billing: <Billing user={user} onNavigate={setPage} />,
     Dashboard: <Dashboard onNavigate={setPage} />,
     "My Shift": <CashierDashboard user={user} onNavigate={setPage} />,
-    Sales: <Sales />,
+    Bills: <Bills user={user} />,
+    Sales: <Bills user={user} />,
     Inventory: <Inventory />,
     Products: <Products />,
     Categories: <Categories />,
