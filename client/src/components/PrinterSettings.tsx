@@ -29,18 +29,48 @@ export function PrinterSettings({ api, userRole }: PrinterSettingsProps) {
 
   // Load configuration & available printers on mount
   useEffect(() => {
-    Promise.all([
-      api("/api/printer-settings").catch(() => DEFAULT_PRINTER_SETTING),
-      api("/api/receipt-templates").catch(() => []),
-      PrinterService.getPrinters(),
-    ]).then(([sett, tmpl, prnters]) => {
-      if (sett) setConfig({ ...DEFAULT_PRINTER_SETTING, ...sett });
-      if (Array.isArray(tmpl)) setTemplates(tmpl);
-      setAvailablePrinters(prnters);
-      setStatusInfo(PrinterService.getStatus());
-      setLoading(false);
-    });
+    let isMounted = true;
+    const loadSettingsAndPrinters = async () => {
+      try {
+        const [sett, tmpl, prnters] = await Promise.all([
+          api("/api/printer-settings").catch(() => DEFAULT_PRINTER_SETTING),
+          api("/api/receipt-templates").catch(() => []),
+          PrinterService.getPrinters(),
+        ]);
+        if (isMounted) {
+          if (sett) setConfig({ ...DEFAULT_PRINTER_SETTING, ...sett });
+          if (Array.isArray(tmpl)) setTemplates(tmpl);
+          if (Array.isArray(prnters) && prnters.length > 0) setAvailablePrinters(prnters);
+          setStatusInfo(PrinterService.getStatus(sett?.printerName));
+          setLoading(false);
+        }
+      } catch (err) {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    loadSettingsAndPrinters();
+
+    // Periodic check for QZ Tray status
+    const timer = setInterval(() => {
+      if (isMounted) {
+        setStatusInfo(PrinterService.getStatus(config.printerName));
+      }
+    }, 5000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
   }, [api]);
+
+  const refreshPrintersList = async () => {
+    setLoading(true);
+    const prnters = await PrinterService.getPrinters();
+    setAvailablePrinters(prnters);
+    setStatusInfo(PrinterService.getStatus(config.printerName));
+    setLoading(false);
+  };
 
   const updateConfig = (key: keyof PrinterSettingConfig, value: any) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
@@ -201,7 +231,17 @@ export function PrinterSettings({ api, userRole }: PrinterSettingsProps) {
             </h3>
 
             <div style={{ marginBottom: "12px" }}>
-              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>Select Thermal Printer</label>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                <label style={{ fontSize: "12px", fontWeight: 600 }}>Select Installed Thermal Printer</label>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={refreshPrintersList}
+                  style={{ fontSize: "11px", padding: "2px 8px", height: "auto" }}
+                >
+                  🔄 Scan Printers
+                </button>
+              </div>
               <select
                 value={config.printerName}
                 onChange={(e) => updateConfig("printerName", e.target.value)}
@@ -211,6 +251,32 @@ export function PrinterSettings({ api, userRole }: PrinterSettingsProps) {
                   <option key={p} value={p}>{p}</option>
                 ))}
               </select>
+            </div>
+
+            <div style={{ marginBottom: "12px" }}>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: 600, marginBottom: "4px" }}>Printing Engine</label>
+              <div style={{ display: "flex", gap: "12px", alignItems: "center", height: "36px" }}>
+                <label style={{ cursor: "pointer", fontSize: "13px" }}>
+                  <input
+                    type="radio"
+                    name="printMode"
+                    value="ESC_POS"
+                    checked={config.printMode !== "BROWSER" && config.printerName !== "Browser Print / PDF"}
+                    onChange={() => updateConfig("printMode", "ESC_POS")}
+                  />{" "}
+                  ⚡ Direct ESC/POS Thermal (QZ Tray)
+                </label>
+                <label style={{ cursor: "pointer", fontSize: "13px" }}>
+                  <input
+                    type="radio"
+                    name="printMode"
+                    value="BROWSER"
+                    checked={config.printMode === "BROWSER" || config.printerName === "Browser Print / PDF"}
+                    onChange={() => updateConfig("printMode", "BROWSER")}
+                  />{" "}
+                  🌐 Browser Print / PDF (Fallback)
+                </label>
+              </div>
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" }}>
@@ -260,7 +326,7 @@ export function PrinterSettings({ api, userRole }: PrinterSettingsProps) {
                   checked={config.autoPrint}
                   onChange={(e) => updateConfig("autoPrint", e.target.checked)}
                 />
-                Auto Print Receipt After Successful Checkout
+                Auto Print Thermal Receipt After Successful Sale
               </label>
 
               <label style={{ fontSize: "13px", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px" }}>
@@ -269,7 +335,7 @@ export function PrinterSettings({ api, userRole }: PrinterSettingsProps) {
                   checked={config.cutPaper}
                   onChange={(e) => updateConfig("cutPaper", e.target.checked)}
                 />
-                Cut Paper Command After Printing
+                Send ESC/POS Full Paper Cut Command
               </label>
 
               <label style={{ fontSize: "13px", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px" }}>
@@ -278,13 +344,20 @@ export function PrinterSettings({ api, userRole }: PrinterSettingsProps) {
                   checked={config.openCashDrawer}
                   onChange={(e) => updateConfig("openCashDrawer", e.target.checked)}
                 />
-                Trigger Open Cash Drawer Command
+                Send Cash Drawer Pulse Command (ESC p)
               </label>
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: "8px", borderTop: "1px solid var(--border)" }}>
-              <div style={{ fontSize: "12px", color: statusInfo.connected ? "var(--green)" : "var(--red)" }}>
-                ● {statusInfo.message}
+              <div>
+                <div style={{ fontSize: "12px", fontWeight: 600, color: statusInfo.connected ? "var(--green, #27ae60)" : "var(--red, #e74c3c)" }}>
+                  ● {statusInfo.message}
+                </div>
+                {!statusInfo.connected && (
+                  <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
+                    Ensure QZ Tray service is running on Windows to enable silent ESC/POS thermal printing.
+                  </div>
+                )}
               </div>
               <button
                 type="button"
@@ -292,7 +365,7 @@ export function PrinterSettings({ api, userRole }: PrinterSettingsProps) {
                 onClick={handleTestPrint}
                 style={{ padding: "6px 12px", fontSize: "12px" }}
               >
-                &#x1F5A8; Test Print
+                🖨️ Test Thermal Print
               </button>
             </div>
 

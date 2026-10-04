@@ -38,8 +38,8 @@ const api = async (path: string, options: RequestInit = {}) => {
   return data;
 };
 
-async function triggerReceiptPrint(sale: any, customConfig?: PrinterSettingConfig) {
-  if (!sale) return;
+async function triggerReceiptPrint(sale: any, customConfig?: PrinterSettingConfig): Promise<{ success: boolean; message: string }> {
+  if (!sale) return { success: false, message: "No sale data provided" };
   try {
     const config = customConfig || (await api("/api/printer-settings").catch(() => DEFAULT_PRINTER_SETTING));
     const formattedData: SaleReceiptData = {
@@ -68,9 +68,10 @@ async function triggerReceiptPrint(sale: any, customConfig?: PrinterSettingConfi
       amountReceived: Number(sale.payments?.[0]?.amount || sale.total || 0),
       changeReturned: Math.max(0, Number(sale.payments?.[0]?.amount || 0) - Number(sale.total || 0))
     };
-    await PrinterService.printReceipt(config, formattedData);
-  } catch (e) {
+    return await PrinterService.printReceipt(config, formattedData);
+  } catch (e: any) {
     console.error("Receipt print error:", e);
+    return { success: false, message: e?.message || "Failed to communicate with printer." };
   }
 }
 
