@@ -3019,9 +3019,11 @@ function Products() {
   const [activeFilter, setActiveFilter] = useState("true");
   const [error, setError] = useState<unknown>();
   
-  // Modals
+  // Modals & State
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [isEditingSku, setIsEditingSku] = useState(false);
+  const [duplicateProduct, setDuplicateProduct] = useState<any>(null);
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [bulkCsv, setBulkCsv] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
@@ -3052,24 +3054,62 @@ function Products() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // Unique Brands
   const brands = useMemo(() => Array.from(new Set(rows.map(p => p.brand).filter(Boolean))), [rows]);
   const margin = (b: number, s: number) => s > 0 ? Math.round(((s - b) / s) * 100) : 0;
 
-  const generateBarcode = () => {
-    // Generate a random 13-digit EAN-like barcode
-    const rand = Math.floor(Math.random() * 9000000000000) + 1000000000000;
-    setForm(f => ({ ...f, barcode: String(rand) }));
-  };
+  // Real-time SKU Preview Calculation
+  const skuPreview = useMemo(() => {
+    if (editingId && form.sku) return form.sku;
+    if (!form.name.trim()) return "PRD-GEN-001";
+    
+    const normP = form.name.trim().toLowerCase();
+    const catObj = categories.find(c => c.id === form.categoryId);
+    const catName = catObj?.name || "";
+
+    const kwMap: Record<string, string> = {
+      milk: "MIL", biscuit: "BIS", biscuits: "BIS", cookie: "BIS", salt: "SAL", sugar: "SUG",
+      bread: "BRD", rice: "RIC", shampoo: "SHA", soap: "SOA", detergent: "DET", wash: "DET",
+      oil: "OIL", tea: "TEA", coffee: "COF", noodle: "NOD", maggi: "NOD", juice: "BEV",
+      butter: "BUT", cheese: "CHE", paneer: "PAN", curd: "CRD", ghee: "GHE", flour: "FLO", dal: "DAL"
+    };
+
+    let catCode = "PRD";
+    for (const [kw, code] of Object.entries(kwMap)) {
+      if (normP.includes(kw)) { catCode = code; break; }
+    }
+    if (catCode === "PRD" && catName) {
+      const cleanC = catName.replace(/[^a-zA-Z]/g, "").toUpperCase();
+      if (cleanC.length >= 3) catCode = cleanC.slice(0, 3);
+    }
+    if (catCode === "PRD" && form.name) {
+      const cleanP = form.name.replace(/[^a-zA-Z]/g, "").toUpperCase();
+      if (cleanP.length >= 3) catCode = cleanP.slice(0, 3);
+    }
+
+    let brandCode = "GEN";
+    if (form.brand && form.brand.trim()) {
+      const cleanB = form.brand.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+      if (cleanB.length >= 3) brandCode = cleanB.slice(0, 3);
+      else if (cleanB.length > 0) brandCode = cleanB.padEnd(3, "X");
+    } else {
+      const words = form.name.trim().split(/\s+/).filter(w => /[a-zA-Z0-9]/.test(w));
+      if (words.length >= 2) {
+        const w2 = words[1].replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+        if (w2.length >= 3) brandCode = w2.slice(0, 3);
+      }
+    }
+
+    return `${catCode}-${brandCode}-001`;
+  }, [form.name, form.brand, form.categoryId, form.sku, editingId, categories]);
 
   const openAdd = () => {
     setEditingId(null);
-    const ts = Date.now();
-    const rand = Math.floor(Math.random() * 9000) + 1000;
+    setIsEditingSku(false);
+    setDuplicateProduct(null);
+    setSaveError("");
     setForm({
       name: "", brand: "", categoryId: "", subcategoryId: "",
-      sku: `SKU-${ts}-${rand}`,
-      barcode: String(Math.floor(Math.random() * 9000000000000) + 1000000000000),
+      sku: "", barcode: "",
       purchasePrice: "", sellingPrice: "",
       mrp: "", taxRate: "0", unit: "pcs", stock: "10", minimumStock: "5",
       supplierId: "", batchNumber: "", expiryDate: "", imageUrl: ""
@@ -3079,6 +3119,9 @@ function Products() {
 
   const openEdit = (p: Product) => {
     setEditingId(p.id);
+    setIsEditingSku(false);
+    setDuplicateProduct(null);
+    setSaveError("");
     setForm({
       name: p.name, brand: p.brand || "", categoryId: p.categoryId || "", subcategoryId: p.subcategoryId || "",
       sku: p.sku, barcode: p.barcode || "", purchasePrice: String(p.purchasePrice), sellingPrice: String(p.sellingPrice),
@@ -3113,16 +3156,28 @@ function Products() {
   const saveProduct = async (e: FormEvent) => {
     e.preventDefault();
     setSaveError("");
+    setDuplicateProduct(null);
     try {
-      const payload = {
-        ...form,
+      const payload: any = {
+        name: form.name.trim(),
+        brand: form.brand.trim() || undefined,
+        categoryId: form.categoryId || null,
+        unit: form.unit || "pcs",
         purchasePrice: Number(form.purchasePrice),
         sellingPrice: Number(form.sellingPrice),
         mrp: form.mrp ? Number(form.mrp) : undefined,
         taxRate: Number(form.taxRate),
         stock: Number(form.stock),
-        minimumStock: Number(form.minimumStock)
+        minimumStock: Number(form.minimumStock),
+        barcode: form.barcode.trim() ? form.barcode.trim() : null,
+        supplierId: form.supplierId || null,
+        batchNumber: form.batchNumber ? form.batchNumber.trim() : undefined,
+        expiryDate: form.expiryDate || undefined
       };
+
+      if (form.sku && form.sku.trim()) {
+        payload.sku = form.sku.trim();
+      }
 
       if (editingId) {
         await api(`/api/products/${editingId}`, { method: "PATCH", body: JSON.stringify(payload) });
@@ -3133,6 +3188,9 @@ function Products() {
       setSaveError("");
       loadData();
     } catch (e: any) {
+      if (e?.existingProduct) {
+        setDuplicateProduct(e.existingProduct);
+      }
       setSaveError(e?.message || "Failed to save product. Please try again.");
     }
   };
@@ -3146,7 +3204,7 @@ function Products() {
         if (idx === 0 && (parts[0].toLowerCase().includes("name") || parts[0].toLowerCase().includes("sku"))) return null;
         return {
           name: parts[0] || `Item ${idx}`,
-          sku: parts[1] || `SKU-${Date.now()}-${idx}`,
+          sku: parts[1] || undefined,
           barcode: parts[2] || undefined,
           purchasePrice: Number(parts[3] || 0),
           sellingPrice: Number(parts[4] || 0),
@@ -3240,8 +3298,8 @@ function Products() {
                   <div style={{ fontSize: 10, color: "var(--text-3)" }}>{p.unit || "pcs"} {p.batchNumber ? ` Batch ${p.batchNumber}` : ""}</div>
                 </td>
                 <td className="text-muted">
-                  <div>{p.sku}</div>
-                  <small style={{ fontFamily: "var(--font-mono)", fontSize: 10 }}>{p.barcode || ""}</small>
+                  <div style={{ fontWeight: 700, color: "var(--teal)" }}>{p.sku}</div>
+                  <small style={{ fontFamily: "var(--font-mono)", fontSize: 10 }}>{p.barcode ? `🏷️ ${p.barcode}` : <span style={{ color: "var(--text-3)", fontStyle: "italic" }}>No Barcode</span>}</small>
                 </td>
                 <td>
                   <div>{p.category?.name || "Uncategorized"}</div>
@@ -3278,23 +3336,70 @@ function Products() {
             <h2>{editingId ? "Edit Product" : "Add New Supermarket Product"}</h2>
             <form onSubmit={saveProduct} style={{ marginTop: 12 }}>
               <div className="form-grid-3">
-                <Field label="Product Name *" required value={form.name} onChange={(e: any) => setForm({ ...form, name: e.target.value })} />
-                <Field label="Brand / Manufacturer" value={form.brand} onChange={(e: any) => setForm({ ...form, brand: e.target.value })} placeholder="e.g. Nestle, Amul" />
+                <Field label="Product Name *" required value={form.name} onChange={(e: any) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Amul Taaza Milk 1L" />
+                <Field label="Brand / Manufacturer" value={form.brand} onChange={(e: any) => setForm({ ...form, brand: e.target.value })} placeholder="e.g. Amul, Nestle, Parle" />
                 <Select label="Category" value={form.categoryId} onChange={(e: any) => setForm({ ...form, categoryId: e.target.value })}>
                   <option value="">Select Category</option>
                   {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </Select>
               </div>
 
-              <div className="form-grid-3">
-                <Field label="SKU *" required value={form.sku} onChange={(e: any) => setForm({ ...form, sku: e.target.value })} />
+              <div className="form-grid-3" style={{ alignItems: "flex-start" }}>
                 <div>
-                  <label className="field"><span>Barcode</span></label>
-                  <div style={{ display: "flex", gap: 4 }}>
-                    <input className="input" value={form.barcode} onChange={(e: any) => setForm({ ...form, barcode: e.target.value })} placeholder="Scan or type barcode" />
-                    <Button type="button" className="ghost" onClick={generateBarcode} style={{ whiteSpace: "nowrap" }}>Gen</Button>
-                  </div>
+                  <label className="field">
+                    <span>
+                      SKU {editingId ? "(Stable Identifier)" : "*"}
+                    </span>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input
+                        className="input"
+                        style={{ background: isEditingSku ? "#fff" : "var(--surface-alt)", fontWeight: 700, color: "var(--teal)" }}
+                        value={form.sku || (editingId ? "" : skuPreview)}
+                        readOnly={!isEditingSku && !editingId}
+                        onChange={(e: any) => setForm({ ...form, sku: e.target.value })}
+                      />
+                      {!editingId && (
+                        <Button
+                          type="button"
+                          className="ghost"
+                          style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                          onClick={() => setIsEditingSku(!isEditingSku)}
+                        >
+                          {isEditingSku ? "Auto" : "Edit SKU"}
+                        </Button>
+                      )}
+                      {editingId && (
+                        <Button
+                          type="button"
+                          className="ghost"
+                          style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                          onClick={() => setIsEditingSku(!isEditingSku)}
+                        >
+                          {isEditingSku ? "Lock SKU" : "Edit SKU"}
+                        </Button>
+                      )}
+                    </div>
+                  </label>
+                  <small style={{ color: "var(--text-3)", fontSize: 10, marginTop: 2, display: "block" }}>
+                    {!editingId ? "🔒 Automatically generated from category, product & brand." : "SKU is a stable internal identifier and does not change automatically."}
+                  </small>
                 </div>
+
+                <div>
+                  <label className="field">
+                    <span>Barcode <small style={{ color: "var(--text-3)", fontWeight: 400 }}>(Optional)</small></span>
+                    <input
+                      className="input"
+                      value={form.barcode}
+                      onChange={(e: any) => setForm({ ...form, barcode: e.target.value })}
+                      placeholder="Scan or type barcode"
+                    />
+                  </label>
+                  <small style={{ color: "var(--text-3)", fontSize: 10, marginTop: 2, display: "block" }}>
+                    Leave blank if product has no manufacturer barcode.
+                  </small>
+                </div>
+
                 <Select label="Unit of Measure" value={form.unit} onChange={(e: any) => setForm({ ...form, unit: e.target.value })}>
                   <option value="pcs">Pieces (pcs)</option>
                   <option value="kg">Kilogram (kg)</option>
@@ -3306,9 +3411,9 @@ function Products() {
               </div>
 
               <div className="form-grid-3">
-                <Field label="Purchase Price () *" type="number" step="0.01" required value={form.purchasePrice} onChange={(e: any) => setForm({ ...form, purchasePrice: e.target.value })} />
-                <Field label="Selling Price () *" type="number" step="0.01" required value={form.sellingPrice} onChange={(e: any) => setForm({ ...form, sellingPrice: e.target.value })} />
-                <Field label="MRP ()" type="number" step="0.01" value={form.mrp} onChange={(e: any) => setForm({ ...form, mrp: e.target.value })} />
+                <Field label="Purchase Price (₹) *" type="number" step="0.01" required value={form.purchasePrice} onChange={(e: any) => setForm({ ...form, purchasePrice: e.target.value })} />
+                <Field label="Selling Price (₹) *" type="number" step="0.01" required value={form.sellingPrice} onChange={(e: any) => setForm({ ...form, sellingPrice: e.target.value })} />
+                <Field label="MRP (₹)" type="number" step="0.01" value={form.mrp} onChange={(e: any) => setForm({ ...form, mrp: e.target.value })} />
               </div>
 
               <div className="form-grid-3">
@@ -3326,11 +3431,34 @@ function Products() {
                 <Field label="Expiry Date" type="date" value={form.expiryDate} onChange={(e: any) => setForm({ ...form, expiryDate: e.target.value })} />
               </div>
 
+              {duplicateProduct && (
+                <div className="duplicate-product-card" style={{ marginTop: 10, padding: "10px 14px", background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8 }}>
+                  <div style={{ fontWeight: 700, color: "#92400e", fontSize: 13 }}>⚠️ Barcode already exists.</div>
+                  <div style={{ fontSize: 12, marginTop: 4, color: "#78350f" }}>
+                    <strong>Product:</strong> {duplicateProduct.name}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#78350f" }}>
+                    <strong>SKU:</strong> {duplicateProduct.sku}
+                  </div>
+                  <Button
+                    type="button"
+                    className="ghost"
+                    style={{ marginTop: 8, fontSize: 11, background: "#fff" }}
+                    onClick={() => {
+                      setShowModal(false);
+                      openEdit(duplicateProduct);
+                    }}
+                  >
+                    👁️ View Existing Product
+                  </Button>
+                </div>
+              )}
+
               <div className="modal-footer" style={{ marginTop: 16 }}>
-                <Button type="button" className="ghost" onClick={() => { setShowModal(false); setSaveError(""); }}>Cancel</Button>
+                <Button type="button" className="ghost" onClick={() => { setShowModal(false); setSaveError(""); setDuplicateProduct(null); }}>Cancel</Button>
                 <Button type="submit" className="primary">Save Product</Button>
               </div>
-              {saveError && (
+              {saveError && !duplicateProduct && (
                 <div style={{ marginTop: 10, padding: "8px 12px", background: "var(--red-bg, #fff0f0)", color: "var(--red, #c0392b)", borderRadius: 6, fontSize: 13, border: "1px solid var(--red, #c0392b)" }}>
                    {saveError}
                 </div>
@@ -3350,7 +3478,7 @@ function Products() {
               className="input"
               rows={8}
               style={{ width: "100%", fontFamily: "var(--font-mono)", fontSize: 11 }}
-              placeholder={`Milk 1L, SKU-MILK-1, 8901234567, 45, 52, 100, pcs\nRice 5kg, SKU-RICE-5, 8909876543, 280, 340, 50, pack`}
+              placeholder={`Milk 1L, , 8901234567, 45, 52, 100, pcs\nRice 5kg, , 8909876543, 280, 340, 50, pack`}
               value={bulkCsv}
               onChange={e => setBulkCsv(e.target.value)}
             />

@@ -172,14 +172,165 @@ app.get("/api/products", auth, perm("PRODUCT_VIEW"), async (req, res) => {
   res.json(products);
 });
 
+/* ── Centralized SKU & Barcode Helper ──────────────────── */
+const PRODUCT_KEYWORD_MAP: Record<string, string> = {
+  milk: "MIL",
+  biscuit: "BIS",
+  biscuits: "BIS",
+  cookie: "BIS",
+  cookies: "BIS",
+  salt: "SAL",
+  sugar: "SUG",
+  bread: "BRD",
+  bun: "BRD",
+  rice: "RIC",
+  shampoo: "SHA",
+  soap: "SOA",
+  detergent: "DET",
+  wash: "DET",
+  matic: "DET",
+  oil: "OIL",
+  tea: "TEA",
+  coffee: "COF",
+  noodle: "NOD",
+  noodles: "NOD",
+  maggi: "NOD",
+  pasta: "NOD",
+  juice: "BEV",
+  drink: "BEV",
+  soda: "BEV",
+  water: "WAT",
+  butter: "BUT",
+  cheese: "CHE",
+  paneer: "PAN",
+  curd: "CRD",
+  ghee: "GHE",
+  flour: "FLO",
+  atta: "ATT",
+  dal: "DAL",
+  pulse: "PUL"
+};
+
+const CATEGORY_MAP: Record<string, string> = {
+  dairy: "DAI",
+  grocery: "GRO",
+  beverages: "BEV",
+  beverage: "BEV",
+  biscuits: "BIS",
+  biscuit: "BIS",
+  bakery: "BIS",
+  snacks: "SNK",
+  snack: "SNK",
+  "personal care": "PER",
+  personal: "PER",
+  household: "HOU",
+  cleaning: "CLN",
+  cleaner: "CLN",
+  stationery: "STA",
+  vegetables: "VEG",
+  fruits: "VEG"
+};
+
+function getCategoryOrProductPrefix(productName: string, categoryName?: string): string {
+  const normProduct = (productName || "").trim().toLowerCase();
+  
+  for (const [kw, code] of Object.entries(PRODUCT_KEYWORD_MAP)) {
+    if (normProduct.includes(kw)) return code;
+  }
+
+  if (categoryName && categoryName.trim()) {
+    const normCat = categoryName.trim().toLowerCase();
+    for (const [catKw, code] of Object.entries(CATEGORY_MAP)) {
+      if (normCat.includes(catKw)) return code;
+    }
+    const cleanCat = categoryName.replace(/[^a-zA-Z]/g, "").toUpperCase();
+    if (cleanCat.length >= 3) return cleanCat.slice(0, 3);
+  }
+
+  const cleanProd = productName.replace(/[^a-zA-Z]/g, "").toUpperCase();
+  if (cleanProd.length >= 3) return cleanProd.slice(0, 3);
+
+  return "PRD";
+}
+
+function getBrandPrefix(brandName?: string, productName?: string): string {
+  if (brandName && brandName.trim()) {
+    const cleanBrand = brandName.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+    if (cleanBrand.length >= 3) return cleanBrand.slice(0, 3);
+    if (cleanBrand.length > 0) return cleanBrand.padEnd(3, "X");
+  }
+
+  if (productName) {
+    const words = productName.trim().split(/\s+/).filter(w => /[a-zA-Z0-9]/.test(w));
+    if (words.length >= 2) {
+      const w2 = words[1].replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+      if (w2.length >= 3) return w2.slice(0, 3);
+    }
+  }
+
+  return "GEN";
+}
+
+async function generateCentralizedSku(
+  tx: any,
+  shopId: string,
+  name: string,
+  brand?: string,
+  categoryName?: string,
+  manualSku?: string
+): Promise<string> {
+  if (manualSku && manualSku.trim() && !manualSku.startsWith("SKU-") && !manualSku.startsWith("TEMP-")) {
+    const custom = manualSku.trim().toUpperCase();
+    const existing = await tx.product.findFirst({ where: { shopId, sku: custom } });
+    if (!existing) return custom;
+  }
+
+  const catCode = getCategoryOrProductPrefix(name, categoryName);
+  const brandCode = getBrandPrefix(brand, name);
+  const prefix = `${catCode}-${brandCode}`;
+
+  const existingProducts = await tx.product.findMany({
+    where: { shopId, sku: { startsWith: prefix } },
+    select: { sku: true }
+  });
+
+  const existingSkus = new Set(existingProducts.map((p: any) => p.sku.toUpperCase()));
+
+  let sequence = 1;
+  let candidate = `${prefix}-${String(sequence).padStart(3, "0")}`;
+
+  while (existingSkus.has(candidate)) {
+    sequence++;
+    candidate = `${prefix}-${String(sequence).padStart(3, "0")}`;
+  }
+
+  return candidate;
+}
+
+app.get("/api/products/preview-sku", auth, async (req, res) => {
+  const shopId = getAuth(req).shopId;
+  const name = String(req.query.name || "").trim();
+  const brand = String(req.query.brand || "").trim();
+  const categoryId = req.query.categoryId ? String(req.query.categoryId) : undefined;
+
+  if (!name) return res.json({ previewSku: "PRD-GEN-001" });
+
+  let categoryName: string | undefined = undefined;
+  if (categoryId) {
+    const cat = await db.category.findFirst({ where: { id: categoryId, shopId } });
+    categoryName = cat?.name;
+  }
+
+  const sku = await generateCentralizedSku(db, shopId, name, brand, categoryName);
+  res.json({ previewSku: sku });
+});
+
 app.post("/api/products", auth, perm("PRODUCT_CREATE"), async (req, res) => {
   const a = getAuth(req);
   const p = z.object({
-    sku: z.string().min(1),
-    barcode: z.string().optional(),
-    name: z.string().min(1),
-    description: z.string().optional(),
+    name: z.string().min(1, "Product name is required"),
     brand: z.string().optional(),
+    description: z.string().optional(),
     unit: z.string().default("pcs"),
     purchasePrice: z.coerce.number().nonnegative(),
     sellingPrice: z.coerce.number().nonnegative(),
@@ -187,22 +338,99 @@ app.post("/api/products", auth, perm("PRODUCT_CREATE"), async (req, res) => {
     taxRate: z.coerce.number().min(0).max(100).default(0),
     stock: z.coerce.number().nonnegative().default(0),
     minimumStock: z.coerce.number().nonnegative().default(0),
-    categoryId: z.string().optional(),
-    subcategoryId: z.string().optional(),
-    supplierId: z.string().optional(),
+    categoryId: z.string().nullable().optional(),
+    subcategoryId: z.string().nullable().optional(),
+    supplierId: z.string().nullable().optional(),
     batchNumber: z.string().optional(),
     expiryDate: z.string().optional().transform(val => val ? new Date(val) : undefined),
     imageUrl: z.string().optional(),
+    sku: z.string().optional(),
+    barcode: z.string().nullable().optional()
   }).safeParse(req.body);
 
-  if (!p.success) return res.status(400).json({ error: "Invalid product data" });
+  if (!p.success) return res.status(400).json({ error: "Invalid product data: " + p.error.errors.map(e => e.message).join(", ") });
 
   try {
-    const x = await db.product.create({ data: { ...p.data, shopId: a.shopId } });
-    await db.auditLog.create({ data: { shopId: a.shopId, userId: a.userId, action: "PRODUCT_CREATED", entity: "Product", entityId: x.id, metadata: { name: x.name, sku: x.sku } } });
-    res.status(201).json(x);
+    const result = await db.$transaction(async tx => {
+      let cleanBarcode: string | null = null;
+      if (p.data.barcode && p.data.barcode.trim()) {
+        cleanBarcode = p.data.barcode.trim();
+        const existingBarcodeProd = await tx.product.findFirst({
+          where: { shopId: a.shopId, barcode: cleanBarcode }
+        });
+        if (existingBarcodeProd) {
+          const err: any = new Error("Barcode already exists.");
+          err.existingProduct = {
+            id: existingBarcodeProd.id,
+            name: existingBarcodeProd.name,
+            sku: existingBarcodeProd.sku
+          };
+          throw err;
+        }
+      }
+
+      let categoryName: string | undefined = undefined;
+      if (p.data.categoryId) {
+        const cat = await tx.category.findFirst({ where: { id: p.data.categoryId, shopId: a.shopId } });
+        categoryName = cat?.name;
+      }
+
+      const finalSku = await generateCentralizedSku(
+        tx,
+        a.shopId,
+        p.data.name,
+        p.data.brand,
+        categoryName,
+        p.data.sku
+      );
+
+      const product = await tx.product.create({
+        data: {
+          shopId: a.shopId,
+          name: p.data.name.trim(),
+          brand: p.data.brand?.trim() || null,
+          description: p.data.description?.trim() || null,
+          unit: p.data.unit || "pcs",
+          purchasePrice: p.data.purchasePrice,
+          sellingPrice: p.data.sellingPrice,
+          mrp: p.data.mrp,
+          taxRate: p.data.taxRate,
+          stock: p.data.stock,
+          minimumStock: p.data.minimumStock,
+          categoryId: p.data.categoryId || null,
+          subcategoryId: p.data.subcategoryId || null,
+          supplierId: p.data.supplierId || null,
+          batchNumber: p.data.batchNumber?.trim() || null,
+          expiryDate: p.data.expiryDate,
+          imageUrl: p.data.imageUrl || null,
+          sku: finalSku,
+          barcode: cleanBarcode
+        }
+      });
+
+      await tx.auditLog.create({
+        data: {
+          shopId: a.shopId,
+          userId: a.userId,
+          action: "PRODUCT_CREATED",
+          entity: "Product",
+          entityId: product.id,
+          metadata: { name: product.name, sku: product.sku, barcode: product.barcode }
+        }
+      });
+
+      return product;
+    });
+
+    res.status(201).json(result);
   } catch (err: any) {
-    res.status(409).json({ error: "SKU or barcode already exists in database" });
+    if (err.existingProduct) {
+      return res.status(400).json({
+        error: `Barcode already exists.`,
+        existingProduct: err.existingProduct
+      });
+    }
+    res.status(400).json({ error: err.message || "Failed to create product" });
   }
 });
 
@@ -215,22 +443,33 @@ app.post("/api/products/bulk", auth, perm("PRODUCT_CREATE"), async (req, res) =>
   let skipped = 0;
 
   for (const item of items) {
-    if (!item.name || !item.sku || item.sellingPrice === undefined) { skipped++; continue; }
+    if (!item.name || item.sellingPrice === undefined) { skipped++; continue; }
     try {
-      await db.product.create({
-        data: {
-          shopId: a.shopId,
-          sku: String(item.sku).trim(),
-          barcode: item.barcode ? String(item.barcode).trim() : undefined,
-          name: String(item.name).trim(),
-          brand: item.brand ? String(item.brand).trim() : undefined,
-          purchasePrice: Number(item.purchasePrice || 0),
-          sellingPrice: Number(item.sellingPrice || 0),
-          mrp: item.mrp ? Number(item.mrp) : undefined,
-          stock: Number(item.stock || 0),
-          minimumStock: Number(item.minimumStock || 0),
-          unit: item.unit || "pcs"
+      await db.$transaction(async tx => {
+        let cleanBarcode: string | null = null;
+        if (item.barcode && String(item.barcode).trim()) {
+          cleanBarcode = String(item.barcode).trim();
+          const dup = await tx.product.findFirst({ where: { shopId: a.shopId, barcode: cleanBarcode } });
+          if (dup) throw Error("Duplicate barcode");
         }
+
+        const finalSku = await generateCentralizedSku(tx, a.shopId, String(item.name).trim(), item.brand ? String(item.brand).trim() : undefined, undefined, item.sku);
+
+        await tx.product.create({
+          data: {
+            shopId: a.shopId,
+            sku: finalSku,
+            barcode: cleanBarcode,
+            name: String(item.name).trim(),
+            brand: item.brand ? String(item.brand).trim() : undefined,
+            purchasePrice: Number(item.purchasePrice || 0),
+            sellingPrice: Number(item.sellingPrice || 0),
+            mrp: item.mrp ? Number(item.mrp) : undefined,
+            stock: Number(item.stock || 0),
+            minimumStock: Number(item.minimumStock || 0),
+            unit: item.unit || "pcs"
+          }
+        });
       });
       inserted++;
     } catch {
@@ -252,6 +491,7 @@ app.get("/api/products/:id", auth, perm("PRODUCT_VIEW"), async (req, res) => {
 
 app.patch("/api/products/:id", auth, perm("PRODUCT_EDIT"), async (req, res) => {
   const a = getAuth(req);
+  const productId = String(req.params.id);
   const p = z.object({
     name: z.string().min(1).optional(),
     brand: z.string().optional(),
@@ -265,16 +505,85 @@ app.patch("/api/products/:id", auth, perm("PRODUCT_EDIT"), async (req, res) => {
     supplierId: z.string().nullable().optional(),
     batchNumber: z.string().optional(),
     expiryDate: z.string().nullable().optional().transform(val => val ? new Date(val) : null),
-    active: z.boolean().optional()
+    active: z.boolean().optional(),
+    sku: z.string().optional(),
+    barcode: z.string().nullable().optional()
   }).safeParse(req.body);
 
   if (!p.success) return res.status(400).json({ error: "Invalid update payload" });
 
-  const x = await db.product.updateMany({ where: { id: String(req.params.id), shopId: a.shopId }, data: p.data });
-  if (!x.count) return res.status(404).json({ error: "Product not found" });
+  try {
+    await db.$transaction(async tx => {
+      const existing = await tx.product.findFirst({ where: { id: productId, shopId: a.shopId } });
+      if (!existing) throw Error("Product not found");
 
-  await db.auditLog.create({ data: { shopId: a.shopId, userId: a.userId, action: "PRODUCT_UPDATED", entity: "Product", entityId: String(req.params.id) } });
-  res.json({ ok: true });
+      const updateData: any = { ...p.data };
+
+      if (p.data.barcode !== undefined) {
+        if (p.data.barcode && p.data.barcode.trim()) {
+          const cleanBarcode = p.data.barcode.trim();
+          const dup = await tx.product.findFirst({
+            where: { shopId: a.shopId, barcode: cleanBarcode, NOT: { id: productId } }
+          });
+          if (dup) {
+            const err: any = new Error("Barcode already exists.");
+            err.existingProduct = { id: dup.id, name: dup.name, sku: dup.sku };
+            throw err;
+          }
+          updateData.barcode = cleanBarcode;
+        } else {
+          updateData.barcode = null;
+        }
+      }
+
+      if (p.data.sku && p.data.sku.trim() && p.data.sku.trim().toUpperCase() !== existing.sku.toUpperCase()) {
+        const newSku = p.data.sku.trim().toUpperCase();
+        const dupSku = await tx.product.findFirst({
+          where: { shopId: a.shopId, sku: newSku, NOT: { id: productId } }
+        });
+        if (dupSku) throw Error(`SKU ${newSku} is already in use by another product.`);
+        updateData.sku = newSku;
+
+        await tx.auditLog.create({
+          data: {
+            shopId: a.shopId,
+            userId: a.userId,
+            action: "PRODUCT_UPDATED",
+            entity: "Product",
+            entityId: productId,
+            metadata: { field: "sku", from: existing.sku, to: newSku, reason: "Manual SKU correction" }
+          }
+        });
+      } else {
+        delete updateData.sku;
+      }
+
+      await tx.product.update({
+        where: { id: productId },
+        data: updateData
+      });
+
+      await tx.auditLog.create({
+        data: {
+          shopId: a.shopId,
+          userId: a.userId,
+          action: "PRODUCT_UPDATED",
+          entity: "Product",
+          entityId: productId
+        }
+      });
+    });
+
+    res.json({ ok: true });
+  } catch (err: any) {
+    if (err.existingProduct) {
+      return res.status(400).json({
+        error: `Barcode already exists.`,
+        existingProduct: err.existingProduct
+      });
+    }
+    res.status(400).json({ error: err.message || "Failed to update product" });
+  }
 });
 
 app.delete("/api/products/:id", auth, perm("PRODUCT_DELETE"), async (req, res) => {
