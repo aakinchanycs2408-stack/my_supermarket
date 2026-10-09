@@ -1,5 +1,7 @@
 import "dotenv/config";
 import crypto from "node:crypto";
+import path from "node:path";
+import fs from "node:fs";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -558,18 +560,42 @@ app.patch("/api/products/:id", auth, perm("PRODUCT_EDIT"), async (req, res) => {
         delete updateData.sku;
       }
 
+      // Compare purchase price & MRP changes for current + previous pricing rule
+      const currPurchase = Number(existing.purchasePrice || 0);
+      const currMrp = existing.mrp !== null && existing.mrp !== undefined ? Number(existing.mrp) : null;
+
+      const newPurchase = p.data.purchasePrice !== undefined ? Number(p.data.purchasePrice) : currPurchase;
+      const newMrp = p.data.mrp !== undefined ? (p.data.mrp !== null ? Number(p.data.mrp) : null) : currMrp;
+
+      const purchaseChanged = Math.abs(newPurchase - currPurchase) > 0.0001;
+      const mrpChanged = (currMrp === null && newMrp !== null) ||
+                         (currMrp !== null && newMrp === null) ||
+                         (currMrp !== null && newMrp !== null && Math.abs(newMrp - currMrp) > 0.0001);
+
+      if (purchaseChanged || mrpChanged) {
+        updateData.previousPurchasePrice = currPurchase;
+        updateData.previousMRP = currMrp;
+        updateData.purchasePrice = newPurchase;
+        updateData.mrp = newMrp;
+      }
+
       await tx.product.update({
         where: { id: productId },
         data: updateData
       });
 
+      const auditAction = p.data.active !== undefined && p.data.active !== existing.active
+        ? (p.data.active ? "PRODUCT_REACTIVATED" : "PRODUCT_DEACTIVATED")
+        : "PRODUCT_UPDATED";
+
       await tx.auditLog.create({
         data: {
           shopId: a.shopId,
           userId: a.userId,
-          action: "PRODUCT_UPDATED",
+          action: auditAction,
           entity: "Product",
-          entityId: productId
+          entityId: productId,
+          metadata: { name: existing.name, sku: existing.sku }
         }
       });
     });
@@ -586,12 +612,113 @@ app.patch("/api/products/:id", auth, perm("PRODUCT_EDIT"), async (req, res) => {
   }
 });
 
+app.get("/api/products/:id/usage", auth, perm("PRODUCT_VIEW"), async (req, res) => {
+  const a = getAuth(req);
+  const productId = String(req.params.id);
+  const product = await db.product.findFirst({
+    where: { id: productId, shopId: a.shopId }
+  });
+  if (!product) return res.status(404).json({ error: "Product not found" });
+
+  const [saleItems, purchaseItems, inventoryMovements, returnItems, offers] = await Promise.all([
+    db.saleItem.count({ where: { productId } }),
+    db.purchaseItem.count({ where: { productId } }),
+    db.inventoryMovement.count({ where: { productId } }),
+    db.returnItem.count({ where: { productId } }),
+    db.offer.count({ where: { productId } })
+  ]);
+
+  const totalReferences = saleItems + purchaseItems + inventoryMovements + returnItems + offers;
+
+  res.json({
+    productId: product.id,
+    name: product.name,
+    sku: product.sku,
+    active: product.active,
+    hasTransactions: totalReferences > 0,
+    totalReferences,
+    details: {
+      saleItems,
+      purchaseItems,
+      inventoryMovements,
+      returnItems,
+      offers
+    }
+  });
+});
+
 app.delete("/api/products/:id", auth, perm("PRODUCT_DELETE"), async (req, res) => {
   const a = getAuth(req);
-  const x = await db.product.deleteMany({ where: { id: String(req.params.id), shopId: a.shopId } });
-  if (!x.count) return res.status(404).json({ error: "Product not found" });
-  await db.auditLog.create({ data: { shopId: a.shopId, userId: a.userId, action: "PRODUCT_DELETED", entity: "Product", entityId: String(req.params.id) } });
-  res.json({ ok: true });
+  const productId = String(req.params.id);
+  const product = await db.product.findFirst({
+    where: { id: productId, shopId: a.shopId }
+  });
+  if (!product) return res.status(404).json({ error: "Product not found" });
+
+  const [saleItems, purchaseItems, inventoryMovements, returnItems, offers] = await Promise.all([
+    db.saleItem.count({ where: { productId } }),
+    db.purchaseItem.count({ where: { productId } }),
+    db.inventoryMovement.count({ where: { productId } }),
+    db.returnItem.count({ where: { productId } }),
+    db.offer.count({ where: { productId } })
+  ]);
+
+  const totalReferences = saleItems + purchaseItems + inventoryMovements + returnItems + offers;
+  const action = String(req.query.action || (req.body && (req.body as any).action) || "").toLowerCase();
+
+  if (totalReferences > 0) {
+    if (action === "deactivate") {
+      await db.product.update({
+        where: { id: productId },
+        data: { active: false }
+      });
+      await db.auditLog.create({
+        data: {
+          shopId: a.shopId,
+          userId: a.userId,
+          action: "PRODUCT_DEACTIVATED",
+          entity: "Product",
+          entityId: productId,
+          metadata: { name: product.name, sku: product.sku, reason: "Has transaction history" }
+        }
+      });
+      return res.json({
+        ok: true,
+        action: "DEACTIVATED",
+        message: "Product deactivated successfully.",
+        active: false
+      });
+    }
+
+    return res.status(409).json({
+      code: "PRODUCT_HAS_TRANSACTIONS",
+      message: "Product has transaction history and cannot be permanently deleted.",
+      action: "DEACTIVATE",
+      hasTransactions: true,
+      details: { saleItems, purchaseItems, inventoryMovements, returnItems, offers }
+    });
+  }
+
+  await db.$transaction(async tx => {
+    await tx.quickAccessProduct.deleteMany({ where: { productId } });
+    await tx.product.delete({ where: { id: productId } });
+    await tx.auditLog.create({
+      data: {
+        shopId: a.shopId,
+        userId: a.userId,
+        action: "PRODUCT_DELETED",
+        entity: "Product",
+        entityId: productId,
+        metadata: { name: product.name, sku: product.sku }
+      }
+    });
+  });
+
+  res.json({
+    ok: true,
+    action: "DELETED",
+    message: "Product deleted successfully."
+  });
 });
 
 
@@ -933,7 +1060,16 @@ app.patch("/api/suppliers/:id", auth, perm("SUPPLIER_CREATE"), async (req, res) 
 /* ── Purchases API ─────────────────────────────────────── */
 app.get("/api/purchases", auth, perm("PURCHASE_CREATE"), async (req, res) => res.json(await db.purchase.findMany({ where: { shopId: getAuth(req).shopId }, include: { supplier: { select: { name: true } }, items: { include: { product: { select: { name: true, sku: true } } } } }, orderBy: { createdAt: "desc" }, take: 200 })));
 app.post("/api/purchases", auth, perm("PURCHASE_CREATE"), async (req, res) => {
-  const a = getAuth(req), p = z.object({ supplierId: z.string().optional(), invoiceNumber: z.string().min(1), items: z.array(z.object({ productId: z.string(), quantity: z.coerce.number().positive(), unitPrice: z.coerce.number().nonnegative() })).min(1) }).safeParse(req.body);
+  const a = getAuth(req), p = z.object({
+    supplierId: z.string().optional(),
+    invoiceNumber: z.string().min(1),
+    items: z.array(z.object({
+      productId: z.string(),
+      quantity: z.coerce.number().positive(),
+      unitPrice: z.coerce.number().nonnegative(),
+      mrp: z.coerce.number().nonnegative().optional()
+    })).min(1)
+  }).safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "Invalid purchase data" });
   try {
     const out = await db.$transaction(async tx => {
@@ -944,8 +1080,32 @@ app.post("/api/purchases", auth, perm("PURCHASE_CREATE"), async (req, res) => {
       for (const i of lines) {
         const product = await tx.product.findFirst({ where: { id: i.productId, shopId: a.shopId } });
         if (!product) throw Error("Product not found");
+        if (!product.active) throw Error(`Product "${product.name}" is inactive and cannot be purchased. Reactivate it first.`);
+
+        const currPurchase = Number(product.purchasePrice || 0);
+        const currMrp = product.mrp !== null && product.mrp !== undefined ? Number(product.mrp) : null;
+
+        const newPurchase = i.unitPrice;
+        const newMrp = i.mrp !== undefined ? Number(i.mrp) : currMrp;
+
+        const purchaseChanged = Math.abs(newPurchase - currPurchase) > 0.0001;
+        const mrpChanged = (currMrp === null && newMrp !== null) ||
+                           (currMrp !== null && newMrp === null) ||
+                           (currMrp !== null && newMrp !== null && Math.abs(newMrp - currMrp) > 0.0001);
+
+        const prodUpdateData: any = {
+          stock: { increment: i.quantity }
+        };
+
+        if (purchaseChanged || mrpChanged) {
+          prodUpdateData.previousPurchasePrice = currPurchase;
+          prodUpdateData.previousMRP = currMrp;
+          prodUpdateData.purchasePrice = newPurchase;
+          prodUpdateData.mrp = newMrp;
+        }
+
         await tx.purchaseItem.create({ data: { purchaseId: purchase.id, productId: i.productId, quantity: i.quantity, unitPrice: i.unitPrice, total: i.total } });
-        await tx.product.update({ where: { id: i.productId }, data: { stock: { increment: i.quantity }, purchasePrice: i.unitPrice } });
+        await tx.product.update({ where: { id: i.productId }, data: prodUpdateData });
         await tx.inventoryMovement.create({ data: { shopId: a.shopId, productId: i.productId, type: InventoryMovementType.PURCHASE, quantity: i.quantity, referenceId: purchase.id, userId: a.userId } });
       }
       await tx.auditLog.create({ data: { shopId: a.shopId, userId: a.userId, action: "PURCHASE_CREATED", entity: "Purchase", entityId: purchase.id, metadata: { invoiceNumber: p.data.invoiceNumber, total } } });
@@ -1439,8 +1599,9 @@ app.post("/api/sales", auth, perm("BILL_CREATE"), async (req, res) => {
 
       const lines: any[] = []; let subtotal = new Prisma.Decimal(0); let tax = new Prisma.Decimal(0);
       for (const [productId, quantity] of merged) {
-        const product = await tx.product.findFirst({ where: { id: productId, shopId: a.shopId, active: true } });
+        const product = await tx.product.findFirst({ where: { id: productId, shopId: a.shopId } });
         if (!product) throw Error("Product not found");
+        if (!product.active) throw Error(`Product "${product.name}" is inactive and cannot be sold.`);
         const base = new Prisma.Decimal(product.sellingPrice).mul(quantity);
         const t = base.mul(new Prisma.Decimal(product.taxRate)).div(100);
         subtotal = subtotal.plus(base);
@@ -1970,6 +2131,17 @@ app.delete("/api/receipt-templates/:id", auth, perm("SETTINGS_MANAGE"), async (r
 
 
 function money(n: number) { return `₹${n.toFixed(2)}`; }
+
+const distPath = path.resolve(process.cwd(), "dist");
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.use((req, res, next) => {
+    if (req.method === "GET" && !req.path.startsWith("/api") && req.accepts("html")) {
+      return res.sendFile(path.join(distPath, "index.html"));
+    }
+    next();
+  });
+}
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (res.headersSent) return;

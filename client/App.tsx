@@ -5,7 +5,7 @@ import { PrinterService, DEFAULT_PRINTER_SETTING, PrinterSettingConfig, SaleRece
 /*  Types  */
 type User = { id: string; name: string; email: string; role: "ADMIN" | "CASHIER"; shopId: string };
 type Category = { id: string; name: string; parentId?: string; parent?: { id: string; name: string }; children?: { id: string; name: string }[]; _count?: { products: number } };
-type Product = { id: string; name: string; sku: string; barcode?: string; brand?: string; unit?: string; purchasePrice: number; sellingPrice: number; mrp?: number; taxRate: number; stock: number; minimumStock: number; categoryId?: string; category?: { name: string }; subcategoryId?: string; supplierId?: string; supplier?: { name: string }; batchNumber?: string; expiryDate?: string; imageUrl?: string; active: boolean };
+type Product = { id: string; name: string; sku: string; barcode?: string; brand?: string; unit?: string; purchasePrice: number; sellingPrice: number; mrp?: number; previousPurchasePrice?: number | null; previousMRP?: number | null; taxRate: number; stock: number; minimumStock: number; categoryId?: string; category?: { name: string }; subcategoryId?: string; supplierId?: string; supplier?: { name: string }; batchNumber?: string; expiryDate?: string; imageUrl?: string; active: boolean };
 type Customer = { id: string; name: string; phone?: string; email?: string; address?: string; gstin?: string; creditBalance: number; _count?: { sales: number } };
 type Supplier = { id: string; name: string; phone?: string; email?: string; address?: string; gstin?: string; payableBalance: number; _count?: { purchases: number } };
 type Shift = { id: string; status: string; startTime: string; endTime?: string; openingCash: number; cashSales: number; cashExpenses: number; expectedCash: number; actualCash?: number; difference?: number; notes?: string; user?: { name: string }; counter?: { name: string } };
@@ -16,15 +16,16 @@ type AuditLogItem = { id: string; action: string; entity: string; entityId?: str
 const money = (v: number) => `${Number(v || 0).toFixed(2)}`;
 const moneyShort = (v: number) => { const n = Number(v || 0); if (n >= 100000) return `${(n / 100000).toFixed(1)}L`; if (n >= 1000) return `${(n / 1000).toFixed(1)}K`; return `${n.toFixed(0)}`; };
 const configuredApiUrl = import.meta.env.VITE_API_URL?.trim();
-const API_URL = (configuredApiUrl || "/api").replace(/\/$/, "");
+const API_URL = (configuredApiUrl || "").replace(/\/$/, "");
 const api = async (path: string, options: RequestInit = {}) => {
-  if (import.meta.env.PROD && (!configuredApiUrl || /localhost|127\.0\.0\.1|YOUR-BACKEND-DOMAIN/i.test(API_URL)))
-    throw Error("Production API is not configured. Set VITE_API_URL in Vercel and redeploy.");
+  if (configuredApiUrl && /YOUR-BACKEND-DOMAIN/i.test(configuredApiUrl))
+    throw Error("Production API is not configured. Please update VITE_API_URL.");
   const token = localStorage.getItem("pos_token");
   const requestPath = API_URL.endsWith("/api") && path.startsWith("/api") ? path.slice(4) : path;
+  const url = API_URL ? `${API_URL}${requestPath}` : path;
   let response: Response;
   try {
-    response = await fetch(`${API_URL}${requestPath}`, {
+    response = await fetch(url, {
       ...options,
       headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(path === "/api/sales" && options.method === "POST" ? { "Idempotency-Key": crypto.randomUUID() } : {}), ...(options.headers || {}) },
     });
@@ -490,6 +491,15 @@ function SingleBillWorkspace({
   const [showKbdPopover, setShowKbdPopover] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
+  // Quick-Add Product state
+  const [quickAddBarcode, setQuickAddBarcode] = useState<string | null>(null); // non-null = show "not found" dialog
+  const [showQuickAddForm, setShowQuickAddForm] = useState(false);
+  const [quickAddForm, setQuickAddForm] = useState<any>({});
+  const [quickAddCategories, setQuickAddCategories] = useState<Category[]>([]);
+  const [quickAddSaving, setQuickAddSaving] = useState(false);
+  const [quickAddError, setQuickAddError] = useState<string | null>(null);
+  const [quickAddSuccess, setQuickAddSuccess] = useState<any>(null);
+
   // Load quick-access products from API (admin-configurable)
   useEffect(() => {
     api('/api/quick-access').then((res: any[]) => {
@@ -539,12 +549,20 @@ function SingleBillWorkspace({
         .then(res => {
           setProducts(res); setDropdownOpen(true); setSelectedIndex(0);
           // Exact barcode/SKU match → auto-add immediately
+          const q = query.trim();
           const exact = res.find((p: Product) =>
-            p.barcode?.toLowerCase() === query.trim().toLowerCase() ||
-            p.sku.toLowerCase() === query.trim().toLowerCase()
+            p.barcode?.toLowerCase() === q.toLowerCase() ||
+            p.sku.toLowerCase() === q.toLowerCase()
           );
           if (exact && res.length === 1) {
             addToCart(exact); setQuery(''); setDropdownOpen(false);
+          } else if (res.length === 0) {
+            // Looks like a barcode scan (long numeric string) → trigger "not found" workflow
+            const looksLikeBarcode = /^[0-9A-Za-z\-]{4,}$/.test(q) && q.length >= 4;
+            if (looksLikeBarcode) {
+              setQuickAddBarcode(q);
+              setDropdownOpen(false);
+            }
           }
         }).catch(setError);
     }, 120);
@@ -614,6 +632,8 @@ function SingleBillWorkspace({
         else if (showSuccessModal) setShowSuccessModal(false);
         else if (showAddCustModal) setShowAddCustModal(false);
         else if (showOosModal) setShowOosModal(null);
+        else if (showQuickAddForm) { setShowQuickAddForm(false); setQuickAddBarcode(null); setQuickAddError(null); }
+        else if (quickAddBarcode) { setQuickAddBarcode(null); setQuery(''); }
         else if (dropdownOpen) { setDropdownOpen(false); }
         else if (bill.items.length > 0) setShowClearConfirm(true);
       } else if (dropdownOpen && products.length > 0) {
@@ -624,7 +644,7 @@ function SingleBillWorkspace({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [bill, isPayModalOpen, showSuccessModal, showAddCustModal, showOosModal, dropdownOpen, products, selectedIndex, total]);
+  }, [bill, isPayModalOpen, showSuccessModal, showAddCustModal, showOosModal, dropdownOpen, products, selectedIndex, total, showQuickAddForm, quickAddBarcode]);
 
   const processCheckout = async () => {
     setError(undefined);
@@ -704,7 +724,7 @@ function SingleBillWorkspace({
               ))}
             </div>
           )}
-          {dropdownOpen && query && products.length === 0 && (
+          {dropdownOpen && query && products.length === 0 && !quickAddBarcode && (
             <div className="search-dropdown">
               <div className="search-no-results">No products found for "{query}"</div>
             </div>
@@ -811,22 +831,31 @@ function SingleBillWorkspace({
         <div className="pos-right">
           <div className="checkout-panel">
 
-            {/* CUSTOMER SEARCH */}
-            <div className="co-block">
+            {/* CUSTOMER SECTION */}
+            <div className="co-block co-cust-block">
               <div className="co-block-label">Customer</div>
               {bill.customerId && selectedCustomer ? (
                 <div className="cust-selected-card">
+                  <div className="cust-sel-avatar">{selectedCustomer.name.charAt(0).toUpperCase()}</div>
                   <div className="cust-selected-info">
                     <span className="cust-sel-name">{selectedCustomer.name}</span>
-                    {selectedCustomer.phone && <span className="cust-sel-phone">📞 {selectedCustomer.phone}</span>}
-                    {Number(selectedCustomer.creditBalance) > 0 && (
-                      <span className="cust-sel-credit">⚠ ₹{money(selectedCustomer.creditBalance)} due</span>
-                    )}
+                    <div className="cust-sel-details">
+                      {selectedCustomer.phone && <span className="cust-sel-phone">{selectedCustomer.phone}</span>}
+                      {Number(selectedCustomer.creditBalance) > 0 && (
+                        <span className="cust-sel-credit">₹{money(selectedCustomer.creditBalance)} due</span>
+                      )}
+                    </div>
                   </div>
-                  <button className="cust-sel-clear" title="Remove customer" onClick={() => { onUpdate({ ...bill, customerId: '' }); setCustSearch(''); }}>✕</button>
+                  <div className="cust-sel-actions">
+                    <button className="cust-sel-action-btn" title="Change customer" onClick={() => { onUpdate({ ...bill, customerId: '' }); setCustSearch(''); }}>Change</button>
+                  </div>
                 </div>
               ) : (
                 <div className="cust-search-wrap" style={{ position: 'relative' }}>
+                  <div className="cust-walkin-row">
+                    <span className="cust-walkin-avatar">W</span>
+                    <span className="cust-walkin-label">Walk-in Customer</span>
+                  </div>
                   <div className="co-cust-row">
                     <div style={{ flex: 1, position: 'relative' }}>
                       <span className="cust-search-icon">🔍</span>
@@ -834,7 +863,7 @@ function SingleBillWorkspace({
                         ref={custRef}
                         className="cust-search-input"
                         type="text"
-                        placeholder="Search by name or phone…"
+                        placeholder="Search name or mobile…"
                         value={custSearch}
                         onChange={e => { setCustSearch(e.target.value); setCustDropOpen(true); }}
                         onFocus={() => setCustDropOpen(true)}
@@ -861,8 +890,8 @@ function SingleBillWorkspace({
                               onMouseDown={() => { onUpdate({ ...bill, customerId: c.id }); setCustDropOpen(false); setCustSearch(''); }}>
                               <div className="cust-drop-name">{c.name}</div>
                               <div className="cust-drop-meta">
-                                {c.phone && <span>📞 {c.phone}</span>}
-                                {Number(c.creditBalance) > 0 && <span className="cust-drop-credit">⚠ ₹{money(c.creditBalance)}</span>}
+                                {c.phone && <span>{c.phone}</span>}
+                                {Number(c.creditBalance) > 0 && <span className="cust-drop-credit">₹{money(c.creditBalance)} due</span>}
                               </div>
                             </div>
                           ))}
@@ -874,10 +903,16 @@ function SingleBillWorkspace({
               )}
             </div>
 
-            {/* BILL SUMMARY */}
+            {/* COMPACT BILL SUMMARY */}
             <div className="co-summary-block">
+              <div className="co-sum-stats">
+                <span>{bill.items.length} Items</span>
+                <span className="co-sum-dot">·</span>
+                <span>{itemCount} Qty</span>
+                <span className="co-sum-dot">·</span>
+                <span>{bill.items.length} SKUs</span>
+              </div>
               <div className="co-sum-inner">
-                <div className="co-sum-row"><span>Items</span><span>{itemCount} ({bill.items.length} SKUs)</span></div>
                 <div className="co-sum-row"><span>Subtotal</span><span>₹{money(subtotal)}</span></div>
                 <div className="co-sum-row co-disc-row">
                   <span className="disc-label">Discount</span>
@@ -891,12 +926,22 @@ function SingleBillWorkspace({
                   </div>
                 </div>
                 {discountAmt > 0 && (
-                  <div className="co-sum-row">
-                    <span style={{ color: 'var(--green-text)' }}>Saved</span>
+                  <div className="co-sum-row co-sum-saved">
+                    <span>Discount</span>
                     <span className="disc-neg">−₹{money(discountAmt)}</span>
                   </div>
                 )}
                 <div className="co-sum-row"><span>GST</span><span>₹{money(totalTax)}</span></div>
+                {(() => {
+                  const totalMrp = bill.items.reduce((s, l) => s + (Number(l.product.mrp) > Number(l.product.sellingPrice) ? Number(l.product.mrp) : Number(l.product.sellingPrice)) * l.quantity, 0);
+                  const mrpSavings = totalMrp - total;
+                  return mrpSavings > 0.5 ? (
+                    <div className="co-sum-row co-sum-savings">
+                      <span>You save</span>
+                      <span>₹{money(mrpSavings)}</span>
+                    </div>
+                  ) : null;
+                })()}
               </div>
             </div>
 
@@ -904,41 +949,61 @@ function SingleBillWorkspace({
             <div className="co-total-block">
               <div className="co-total-label">Total to Pay</div>
               <div className="co-grand-row">
-                <span className="co-grand-label">{bill.items.length === 0 ? 'No items' : `${itemCount} item${itemCount !== 1 ? 's' : ''}`}</span>
                 <span className="co-grand-val">₹{money(total)}</span>
               </div>
+              {discountAmt > 0 && (
+                <div className="co-total-savings">Saved ₹{money(discountAmt)} on this bill</div>
+              )}
             </div>
 
-            {/* ACTIONS */}
+            {/* PRIMARY ACTION */}
             <div className="co-actions-block">
               <button className="pay-primary-btn" disabled={!bill.items.length || bill.held}
-                onClick={() => { setCashReceived(String(Math.ceil(total))); setIsPayModalOpen(true); }}>
-                Pay &amp; Checkout
+                onClick={() => { setCashReceived(String(Math.ceil(total))); setMethod('CASH'); setIsPayModalOpen(true); }}>
+                PAY &amp; CHECKOUT
               </button>
+
+              {/* Quick payment method shortcuts */}
+              <div className="co-quick-pay-row">
+                {(['CASH', 'UPI', 'CARD'] as const).map(m => (
+                  <button key={m} className="co-quick-pay-btn" disabled={!bill.items.length || bill.held}
+                    onClick={() => { setCashReceived(String(Math.ceil(total))); setMethod(m); setIsPayModalOpen(true); }}
+                    title={`Pay via ${m}`}>
+                    <span className="co-qp-icon">{m === 'CASH' ? '💵' : m === 'UPI' ? '📱' : '💳'}</span>
+                    <span>{m}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Compact action bar */}
               <div className="co-sec-row">
                 <button className="pay-sec-btn pay-hold-btn" disabled={!bill.items.length || bill.held}
                   onClick={holdBill} title="Hold bill (F6)">⏸ Hold</button>
                 <button className="pay-sec-btn pay-clear-btn" disabled={!bill.items.length}
                   onClick={() => setShowClearConfirm(true)} title="Clear bill">✕ Clear</button>
-                <button className={`pay-kbd-toggle${showKbdPopover ? ' active' : ''}`}
-                  onClick={() => setShowKbdPopover(p => !p)} title="Keyboard shortcuts">⌨</button>
-              </div>
-              {showKbdPopover && (
-                <div className="kbd-popover">
-                  <div className="kbd-popover-title">Keyboard Shortcuts</div>
-                  <div className="kbd-popover-grid">
-                    <kbd>F2</kbd><span>Search / Scan</span>
-                    <kbd>F6</kbd><span>Hold Bill</span>
-                    <kbd>F7</kbd><span>Discount</span>
-                    <kbd>F10</kbd><span>Pay &amp; Checkout</span>
-                    <kbd>Esc</kbd><span>Close / Clear</span>
-                    <kbd>Ctrl+1</kbd><span>Bill 1</span>
-                    <kbd>Ctrl+2</kbd><span>Bill 2</span>
-                    <kbd>Ctrl+3</kbd><span>Bill 3</span>
-                    <kbd>↑ ↓ Enter</kbd><span>Search results</span>
-                  </div>
+                <div className="co-more-wrap" style={{ position: 'relative', flexShrink: 0 }}>
+                  <button className={`pay-sec-btn co-more-btn${showKbdPopover ? ' active' : ''}`}
+                    onClick={() => setShowKbdPopover(p => !p)} title="More actions">More ⋮</button>
+                  {showKbdPopover && (
+                    <div className="co-more-dropdown">
+                      {bill.customerId && (
+                        <button className="co-more-item" onClick={() => { onUpdate({ ...bill, customerId: '' }); setCustSearch(''); setShowKbdPopover(false); }}>Change Customer</button>
+                      )}
+                      <button className="co-more-item" onClick={() => { setShowKbdPopover(false); const inp = document.querySelector('.disc-input') as HTMLInputElement; inp?.focus(); }}>Bill Discount</button>
+                      <div className="co-more-divider" />
+                      <div className="co-more-shortcuts">
+                        <div className="co-more-shortcuts-title">Shortcuts</div>
+                        <div className="co-more-shortcut-row"><kbd>F2</kbd><span>Search</span></div>
+                        <div className="co-more-shortcut-row"><kbd>F6</kbd><span>Hold</span></div>
+                        <div className="co-more-shortcut-row"><kbd>F7</kbd><span>Discount</span></div>
+                        <div className="co-more-shortcut-row"><kbd>F10</kbd><span>Checkout</span></div>
+                        <div className="co-more-shortcut-row"><kbd>Esc</kbd><span>Close</span></div>
+                        <div className="co-more-shortcut-row"><kbd>Ctrl+1/2/3</kbd><span>Bills</span></div>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
           </div>
         </div>
@@ -1081,6 +1146,252 @@ function SingleBillWorkspace({
                 <Button className="primary" type="submit">Save &amp; Use</Button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================
+           PRODUCT NOT FOUND → QUICK ADD PRODUCT WORKFLOW
+         ====================================================== */}
+
+      {/* STEP 1: Product Not Found dialog */}
+      {quickAddBarcode && !showQuickAddForm && !quickAddSuccess && (
+        <div className="pay-modal-overlay" onClick={e => { if (e.target === e.currentTarget) { setQuickAddBarcode(null); setQuery(''); } }}>
+          <div className="modal" style={{ width: 'min(460px,95vw)', padding: 0, overflow: 'hidden' }}>
+            {/* Header */}
+            <div style={{ background: 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)', padding: '20px 24px 16px', color: '#fff' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                <span style={{ fontSize: 22 }}>⚠️</span>
+                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Product Not Found</h2>
+                <button className="pay-close" onClick={() => { setQuickAddBarcode(null); setQuery(''); }} style={{ marginLeft: 'auto', color: '#fff', opacity: 0.8 }}>✕</button>
+              </div>
+              <div style={{ background: 'rgba(255,255,255,0.18)', borderRadius: 6, padding: '8px 12px', fontFamily: 'var(--font-mono, monospace)', fontSize: 15, fontWeight: 700, letterSpacing: 1 }}>
+                {quickAddBarcode}
+              </div>
+            </div>
+            <div style={{ padding: '16px 24px 8px' }}>
+              <p style={{ color: 'var(--text-2)', fontSize: 13, margin: '0 0 16px' }}>
+                This barcode is not registered in your product database.
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <button
+                  className="btn primary"
+                  style={{ width: '100%', padding: '12px', fontSize: 14, fontWeight: 700, background: 'var(--teal,#0d9488)' }}
+                  onClick={async () => {
+                    // Load categories for the form
+                    const cats = await api('/api/categories').catch(() => []);
+                    setQuickAddCategories(cats);
+                    setQuickAddForm({ name: '', brand: '', categoryId: '', unit: 'pcs', sellingPrice: '', mrp: '', purchasePrice: '', taxRate: '0', stock: '1', minimumStock: '0', barcode: quickAddBarcode });
+                    setQuickAddError(null);
+                    setShowQuickAddForm(true);
+                  }}
+                >
+                  ➕ Add New Product
+                </button>
+                <button
+                  className="btn ghost"
+                  style={{ width: '100%', padding: '10px', fontSize: 13 }}
+                  onClick={() => { setQuickAddBarcode(null); setQuery(quickAddBarcode || ''); setDropdownOpen(true); }}
+                >
+                  🔍 Search Existing Products
+                </button>
+                <button
+                  className="btn ghost"
+                  style={{ width: '100%', padding: '10px', fontSize: 13, color: 'var(--text-3)' }}
+                  onClick={() => { setQuickAddBarcode(null); setQuery(''); setTimeout(() => searchRef.current?.focus(), 80); }}
+                >
+                  Cancel — Continue Billing
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 2: Quick Add Product Form */}
+      {showQuickAddForm && quickAddBarcode && !quickAddSuccess && (() => {
+        const qf = quickAddForm;
+        const setQf = (patch: any) => setQuickAddForm((prev: any) => ({ ...prev, ...patch }));
+        const isAdmin = user?.role === 'ADMIN';
+
+        const handleQuickSave = async (e: React.FormEvent) => {
+          e.preventDefault();
+          if (!qf.name?.trim()) { setQuickAddError('Product name is required.'); return; }
+          if (!qf.sellingPrice || Number(qf.sellingPrice) <= 0) { setQuickAddError('A valid selling price is required.'); return; }
+          if (qf.mrp && Number(qf.mrp) > 0 && Number(qf.mrp) < Number(qf.sellingPrice)) { setQuickAddError('MRP cannot be less than selling price.'); return; }
+          setQuickAddSaving(true); setQuickAddError(null);
+          try {
+            const payload = {
+              name: qf.name.trim(),
+              brand: qf.brand?.trim() || undefined,
+              categoryId: qf.categoryId || undefined,
+              unit: qf.unit || 'pcs',
+              purchasePrice: Number(qf.purchasePrice) || 0,
+              sellingPrice: Number(qf.sellingPrice),
+              mrp: Number(qf.mrp) || undefined,
+              taxRate: Number(qf.taxRate) || 0,
+              stock: Number(qf.stock) || 1,
+              minimumStock: Number(qf.minimumStock) || 0,
+              barcode: quickAddBarcode,
+            };
+            const created = await api('/api/products', { method: 'POST', body: JSON.stringify(payload) });
+            // Immediately add to current bill only
+            const productForCart: Product = {
+              id: created.id, name: created.name, sku: created.sku,
+              barcode: created.barcode, brand: created.brand, unit: created.unit,
+              purchasePrice: created.purchasePrice, sellingPrice: created.sellingPrice,
+              mrp: created.mrp, taxRate: created.taxRate, stock: created.stock,
+              minimumStock: created.minimumStock, categoryId: created.categoryId,
+              active: true,
+            };
+            addToCart(productForCart);
+            setQuickAddSuccess(created);
+            setQuery('');
+          } catch (err: any) {
+            const msg = err?.message || 'Failed to create product.';
+            if (msg.toLowerCase().includes('barcode') && err?.existingProduct) {
+              setQuickAddError(`Barcode already exists. Product: ${err.existingProduct.name} (SKU: ${err.existingProduct.sku}).`);
+            } else {
+              setQuickAddError(msg);
+            }
+          } finally {
+            setQuickAddSaving(false);
+          }
+        };
+
+        return (
+          <div className="pay-modal-overlay" onClick={e => { if (e.target === e.currentTarget) { setShowQuickAddForm(false); setQuickAddBarcode(null); } }}>
+            <div className="modal modal-lg" style={{ maxHeight: '90vh', overflowY: 'auto', padding: 0, width: 'min(600px,97vw)' }}>
+              {/* Header */}
+              <div style={{ background: 'linear-gradient(135deg, #0d9488 0%, #0f766e 100%)', padding: '16px 20px', color: '#fff', display: 'flex', alignItems: 'center', gap: 10, position: 'sticky', top: 0, zIndex: 2 }}>
+                <span style={{ fontSize: 20 }}>➕</span>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>Quick Add Product — Bill {billId}</div>
+                  <div style={{ fontSize: 11, opacity: 0.85 }}>Product will be added to Bill {billId} after saving</div>
+                </div>
+                <button className="pay-close" onClick={() => { setShowQuickAddForm(false); setQuickAddBarcode(null); setQuery(''); }} style={{ marginLeft: 'auto', color: '#fff' }}>✕</button>
+              </div>
+
+              <form onSubmit={handleQuickSave} style={{ padding: '18px 20px' }}>
+                {/* Barcode — locked */}
+                <div style={{ background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 16 }}>📦</span>
+                  <div>
+                    <div style={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 600, marginBottom: 2 }}>BARCODE (from scan — locked)</div>
+                    <div style={{ fontFamily: 'var(--font-mono, monospace)', fontWeight: 700, fontSize: 15, letterSpacing: 1 }}>{quickAddBarcode}</div>
+                  </div>
+                  <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--green,#16a34a)', fontWeight: 700 }}>✓ Pre-filled</span>
+                </div>
+
+                {/* Required fields */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12, marginBottom: 14 }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Product Name <span style={{ color: 'var(--red)' }}>*</span></label>
+                    <input className="input" autoFocus required placeholder="e.g. Amul Taaza Milk 1L" value={qf.name || ''} onChange={e => setQf({ name: e.target.value })} style={{ width: '100%' }} />
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Brand / Manufacturer</label>
+                      <input className="input" placeholder="e.g. Amul" value={qf.brand || ''} onChange={e => setQf({ brand: e.target.value })} style={{ width: '100%' }} />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Category</label>
+                      <select className="input" value={qf.categoryId || ''} onChange={e => setQf({ categoryId: e.target.value })} style={{ width: '100%' }}>
+                        <option value="">— Select Category —</option>
+                        {quickAddCategories.map((c: Category) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Selling Price <span style={{ color: 'var(--red)' }}>*</span></label>
+                      <div style={{ position: 'relative' }}>
+                        <span style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-3)', fontSize: 13 }}>₹</span>
+                        <input className="input" type="number" min="0" step="0.01" required placeholder="0.00" value={qf.sellingPrice || ''} onChange={e => setQf({ sellingPrice: e.target.value })} style={{ width: '100%', paddingLeft: 22 }} />
+                      </div>
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>MRP</label>
+                      <div style={{ position: 'relative' }}>
+                        <span style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-3)', fontSize: 13 }}>₹</span>
+                        <input className="input" type="number" min="0" step="0.01" placeholder="0.00" value={qf.mrp || ''} onChange={e => setQf({ mrp: e.target.value })} style={{ width: '100%', paddingLeft: 22 }} />
+                      </div>
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>GST %</label>
+                      <select className="input" value={qf.taxRate || '0'} onChange={e => setQf({ taxRate: e.target.value })} style={{ width: '100%' }}>
+                        {['0','5','12','18','28'].map(r => <option key={r} value={r}>{r}%</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Unit</label>
+                      <select className="input" value={qf.unit || 'pcs'} onChange={e => setQf({ unit: e.target.value })} style={{ width: '100%' }}>
+                        {['pcs','kg','g','L','mL','box','pack','dozen','bottle','bag','can','tube','pair','set','roll'].map(u => <option key={u} value={u}>{u}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Opening Stock</label>
+                      <input className="input" type="number" min="0" placeholder="1" value={qf.stock || ''} onChange={e => setQf({ stock: e.target.value })} style={{ width: '100%' }} />
+                    </div>
+                    {isAdmin && (
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Purchase Price</label>
+                        <div style={{ position: 'relative' }}>
+                          <span style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-3)', fontSize: 13 }}>₹</span>
+                          <input className="input" type="number" min="0" step="0.01" placeholder="0.00" value={qf.purchasePrice || ''} onChange={e => setQf({ purchasePrice: e.target.value })} style={{ width: '100%', paddingLeft: 22 }} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* SKU notice */}
+                <div style={{ background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 12px', marginBottom: 14, fontSize: 12, color: 'var(--text-2)' }}>
+                  <span style={{ fontWeight: 600 }}>ℹ️ SKU</span> will be auto-generated by the server based on product name, brand, and category.
+                </div>
+
+                {quickAddError && (
+                  <div style={{ background: '#fff0f0', border: '1px solid var(--red,#dc2626)', borderRadius: 6, padding: '10px 14px', marginBottom: 12, color: 'var(--red,#dc2626)', fontSize: 13, fontWeight: 500 }}>
+                    ⚠️ {quickAddError}
+                  </div>
+                )}
+
+                <div className="modal-footer" style={{ padding: 0, marginTop: 4 }}>
+                  <Button type="button" className="ghost" onClick={() => { setShowQuickAddForm(false); setQuickAddBarcode(null); setQuery(''); }}>Cancel</Button>
+                  <Button type="submit" className="primary" style={{ background: 'var(--teal,#0d9488)', fontSize: 14, padding: '10px 22px' }} disabled={quickAddSaving}>
+                    {quickAddSaving ? '⏳ Creating...' : '✅ Save & Add to Bill ' + billId}
+                  </Button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* STEP 3: Quick Add Success Confirmation */}
+      {quickAddSuccess && (
+        <div className="pay-modal-overlay" onClick={e => { if (e.target === e.currentTarget) { setQuickAddSuccess(null); setQuickAddBarcode(null); setShowQuickAddForm(false); setTimeout(() => searchRef.current?.focus(), 80); } }}>
+          <div className="modal" style={{ width: 'min(400px,92vw)', textAlign: 'center', padding: '28px 24px' }}>
+            <div style={{ fontSize: 48, marginBottom: 8 }}>✅</div>
+            <h2 style={{ margin: '0 0 4px', color: 'var(--teal,#0d9488)' }}>Product Added!</h2>
+            <p style={{ color: 'var(--text-2)', fontSize: 13, margin: '0 0 16px' }}>Successfully added to Bill {billId}</p>
+            <div style={{ background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px', marginBottom: 16, textAlign: 'left' }}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>{quickAddSuccess.name}</div>
+              <div style={{ fontSize: 12, color: 'var(--text-3)', display: 'grid', gap: 3 }}>
+                <span>SKU: <strong>{quickAddSuccess.sku}</strong></span>
+                <span>Barcode: <strong style={{ fontFamily: 'monospace' }}>{quickAddSuccess.barcode || '—'}</strong></span>
+                <span>Price: <strong>₹{money(quickAddSuccess.sellingPrice)}</strong></span>
+              </div>
+            </div>
+            <Button className="primary" style={{ width: '100%', background: 'var(--teal,#0d9488)', fontWeight: 700 }}
+              onClick={() => { setQuickAddSuccess(null); setQuickAddBarcode(null); setShowQuickAddForm(false); setTimeout(() => searchRef.current?.focus(), 80); }}>
+              ▶ Continue Billing
+            </Button>
           </div>
         </div>
       )}
@@ -1261,10 +1572,14 @@ function Billing({ user, onNavigate }: { user?: User; onNavigate: (p: string) =>
         </div>
         <div className="ph-time">{timeStr}</div>
 
-        {/* Three-dot Menu */}
+        {/* Navigation Menu */}
         <div className="pos-menu-wrap" ref={menuRef}>
           <button className="pos-menu-btn" onClick={() => setMenuOpen(o => !o)} title="Navigation Menu" aria-label="Open navigation menu">
-            <span></span>
+            <svg width="16" height="14" viewBox="0 0 16 14" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="1" y1="2" x2="15" y2="2" />
+              <line x1="1" y1="7" x2="15" y2="7" />
+              <line x1="1" y1="12" x2="15" y2="12" />
+            </svg>
           </button>
           {menuOpen && (
             <div className="pos-menu-dropdown" role="menu">
@@ -3029,6 +3344,9 @@ function Products() {
   const [bulkCsv, setBulkCsv] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
   const [deleteError, setDeleteError] = useState("");
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [productUsage, setProductUsage] = useState<any>(null);
+  const [successMsg, setSuccessMsg] = useState("");
 
   const [form, setForm] = useState({
     name: "", brand: "", categoryId: "", subcategoryId: "", sku: "", barcode: "",
@@ -3135,20 +3453,56 @@ function Products() {
 
   const toggleActive = async (p: Product) => {
     try {
-      await api(`/api/products/${p.id}`, { method: "PATCH", body: JSON.stringify({ active: !p.active }) });
+      const isActivating = !p.active;
+      await api(`/api/products/${p.id}`, { method: "PATCH", body: JSON.stringify({ active: isActivating }) });
+      setSuccessMsg(isActivating ? "Product reactivated successfully." : "Product deactivated successfully.");
+      setTimeout(() => setSuccessMsg(""), 4000);
       loadData();
-    } catch (e) { setError(e); }
+    } catch (e: any) { setError(e); }
   };
 
-  const deleteProduct = async () => {
+  const openDeleteModal = async (p: Product) => {
+    setDeleteError("");
+    setDeleteTarget(p);
+    setUsageLoading(true);
+    setProductUsage(null);
+    try {
+      const res = await api(`/api/products/${p.id}/usage`);
+      setProductUsage(res);
+    } catch {
+      setProductUsage({ hasTransactions: false, totalReferences: 0 });
+    } finally {
+      setUsageLoading(false);
+    }
+  };
+
+  const hardDeleteProduct = async () => {
     if (!deleteTarget) return;
     setDeleteError("");
     try {
       await api(`/api/products/${deleteTarget.id}`, { method: "DELETE" });
       setDeleteTarget(null);
+      setProductUsage(null);
+      setSuccessMsg("Product deleted successfully.");
+      setTimeout(() => setSuccessMsg(""), 4000);
       loadData();
     } catch (e: any) {
       setDeleteError(e?.message || "Failed to delete product.");
+    }
+  };
+
+  const deactivateProduct = async () => {
+    if (!deleteTarget) return;
+    setDeleteError("");
+    try {
+      await api(`/api/products/${deleteTarget.id}?action=deactivate`, { method: "DELETE" });
+      setDeleteTarget(null);
+      setProductUsage(null);
+      setSuccessMsg("Product deactivated successfully.");
+      setTimeout(() => setSuccessMsg(""), 4000);
+      loadData();
+    } catch (e: any) {
+      setDeleteError(e?.message || "Failed to deactivate product.");
     }
   };
 
@@ -3260,6 +3614,11 @@ function Products() {
       }
     >
       <ErrorState error={error} />
+      {successMsg && (
+        <div style={{ background: "#f0fdf4", border: "1px solid #22c55e", color: "#15803d", padding: "10px 16px", borderRadius: 8, marginBottom: 16, fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+          <span>✅</span> {successMsg}
+        </div>
+      )}
 
       {/* Toolbar Filter Row */}
       <div className="toolbar-row">
@@ -3317,10 +3676,10 @@ function Products() {
                 <td>
                   <div style={{ display: "flex", gap: 4 }}>
                     <Button className="ghost" onClick={() => openEdit(p)}>Edit</Button>
-                    <Button className="ghost" onClick={() => toggleActive(p)} style={{ color: p.active ? "var(--red)" : "var(--green)" }}>
-                      {p.active ? "Deactivate" : "Activate"}
+                    <Button className="ghost" onClick={() => toggleActive(p)} style={{ color: p.active ? "var(--amber, #d97706)" : "var(--green)" }}>
+                      {p.active ? "Deactivate" : "Reactivate"}
                     </Button>
-                    <Button className="ghost" onClick={() => { setDeleteError(""); setDeleteTarget(p); }} style={{ color: "var(--red)", borderColor: "var(--red)" }}>Delete</Button>
+                    <Button className="ghost" onClick={() => openDeleteModal(p)} style={{ color: "var(--red)", borderColor: "var(--red)" }}>Delete</Button>
                   </div>
                 </td>
               </tr>
@@ -3411,10 +3770,34 @@ function Products() {
                 </Select>
               </div>
 
-              <div className="form-grid-3">
-                <Field label="Purchase Price (₹) *" type="number" step="0.01" required value={form.purchasePrice} onChange={(e: any) => setForm({ ...form, purchasePrice: e.target.value })} />
-                <Field label="Selling Price (₹) *" type="number" step="0.01" required value={form.sellingPrice} onChange={(e: any) => setForm({ ...form, sellingPrice: e.target.value })} />
-                <Field label="MRP (₹)" type="number" step="0.01" value={form.mrp} onChange={(e: any) => setForm({ ...form, mrp: e.target.value })} />
+              {/* Pricing Section */}
+              <div style={{ background: "var(--surface-alt, #f8fafc)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 16px", marginBottom: 14 }}>
+                <div style={{ fontSize: 11, color: "var(--text-3)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+                  💰 Current Pricing
+                </div>
+                <div className="form-grid-3">
+                  <Field label="Purchase Price (₹) *" type="number" step="0.01" required value={form.purchasePrice} onChange={(e: any) => setForm({ ...form, purchasePrice: e.target.value })} />
+                  <Field label="Selling Price (₹) *" type="number" step="0.01" required value={form.sellingPrice} onChange={(e: any) => setForm({ ...form, sellingPrice: e.target.value })} />
+                  <Field label="MRP (₹)" type="number" step="0.01" value={form.mrp} onChange={(e: any) => setForm({ ...form, mrp: e.target.value })} />
+                </div>
+
+                {editingId && (() => {
+                  const editingProd = rows.find(p => p.id === editingId);
+                  const hasPrev = editingProd && (editingProd.previousPurchasePrice != null || editingProd.previousMRP != null);
+                  if (!hasPrev) return null;
+                  return (
+                    <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px dashed var(--border)", display: "flex", gap: 24, fontSize: 12, color: "var(--text-2)" }}>
+                      <div>
+                        <span style={{ color: "var(--text-3)", fontWeight: 600 }}>Previous Purchase Price: </span>
+                        <strong>{editingProd.previousPurchasePrice != null ? `₹${money(editingProd.previousPurchasePrice)}` : "—"}</strong>
+                      </div>
+                      <div>
+                        <span style={{ color: "var(--text-3)", fontWeight: 600 }}>Previous MRP: </span>
+                        <strong>{editingProd.previousMRP != null ? `₹${money(editingProd.previousMRP)}` : "—"}</strong>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="form-grid-3">
@@ -3491,20 +3874,59 @@ function Products() {
         </div>
       )}
 
-      {/* Delete Product Confirmation Modal */}
+      {/* Delete / Deactivate Confirmation Modal */}
       {deleteTarget && (
-        <div className="pay-modal-overlay" onClick={e => { if (e.target === e.currentTarget) setDeleteTarget(null); }}>
-          <div className="modal confirm-modal">
-            <span className="confirm-icon">&#x1F5D1;</span>
-            <h2>Delete Product?</h2>
-            <p style={{ textAlign: "center", color: "var(--text-2)", marginBottom: 8 }}>
-              <strong>{deleteTarget.name}</strong> (SKU: {deleteTarget.sku}) will be <strong>permanently deleted</strong>. This cannot be undone.
-            </p>
-            {deleteError && <div className="error" style={{ marginBottom: 8 }}>{deleteError}</div>}
-            <div className="modal-footer">
-              <Button className="ghost" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-              <Button className="primary" style={{ background: "var(--red)" }} onClick={deleteProduct}>Yes, Delete Product</Button>
-            </div>
+        <div className="pay-modal-overlay" onClick={e => { if (e.target === e.currentTarget) { setDeleteTarget(null); setProductUsage(null); } }}>
+          <div className="modal confirm-modal" style={{ width: 'min(460px,94vw)', textAlign: "center" }}>
+            {usageLoading ? (
+              <div style={{ padding: "20px 0" }}>
+                <div style={{ fontSize: 28, marginBottom: 8 }}>⏳</div>
+                <div style={{ fontSize: 14, color: "var(--text-2)" }}>Checking transaction history...</div>
+              </div>
+            ) : productUsage?.hasTransactions ? (
+              /* CASE B — PRODUCT HAS HISTORY */
+              <>
+                <span className="confirm-icon" style={{ fontSize: 36, color: "var(--amber, #d97706)", marginBottom: 8, display: "block" }}>⚠️</span>
+                <h2 style={{ fontSize: 18, margin: "0 0 8px" }}>Product Has Transaction History</h2>
+                <p style={{ color: "var(--text-2)", fontSize: 13, margin: "0 0 12px", lineHeight: 1.4 }}>
+                  This product is already used in sales, purchases, or inventory records. It cannot be permanently deleted.
+                </p>
+                <div style={{ background: "var(--surface-alt, #f8fafc)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "var(--text-2)", textAlign: "left" }}>
+                  <div style={{ fontWeight: 700, color: "var(--text-1)", marginBottom: 4 }}>Product: {deleteTarget.name} (SKU: {deleteTarget.sku})</div>
+                  <div style={{ fontSize: 11, color: "var(--text-3)" }}>
+                    {productUsage.details?.saleItems > 0 && <span>• {productUsage.details.saleItems} sale item(s) </span>}
+                    {productUsage.details?.purchaseItems > 0 && <span>• {productUsage.details.purchaseItems} purchase item(s) </span>}
+                    {productUsage.details?.inventoryMovements > 0 && <span>• {productUsage.details.inventoryMovements} stock movement(s) </span>}
+                  </div>
+                </div>
+                {deleteError && <div className="error" style={{ marginBottom: 12 }}>{deleteError}</div>}
+                <div className="modal-footer" style={{ justifyContent: "center", gap: 10, marginTop: 4 }}>
+                  <Button className="ghost" onClick={() => { setDeleteTarget(null); setProductUsage(null); }}>Cancel</Button>
+                  <Button className="primary" style={{ background: "var(--amber, #d97706)", border: "none" }} onClick={deactivateProduct}>
+                    Deactivate Product
+                  </Button>
+                </div>
+              </>
+            ) : (
+              /* CASE A — UNUSED PRODUCT */
+              <>
+                <span className="confirm-icon" style={{ fontSize: 36, color: "var(--red)", marginBottom: 8, display: "block" }}>🗑️</span>
+                <h2 style={{ fontSize: 18, margin: "0 0 8px" }}>Delete Product?</h2>
+                <p style={{ color: "var(--text-2)", fontSize: 13, margin: "0 0 12px", lineHeight: 1.4 }}>
+                  This product has no transaction history and can be permanently deleted.
+                </p>
+                <div style={{ background: "var(--surface-alt, #f8fafc)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 13, fontWeight: 700 }}>
+                  {deleteTarget.name} <span style={{ fontWeight: 400, color: "var(--text-3)", fontSize: 11 }}>(SKU: {deleteTarget.sku})</span>
+                </div>
+                {deleteError && <div className="error" style={{ marginBottom: 12 }}>{deleteError}</div>}
+                <div className="modal-footer" style={{ justifyContent: "center", gap: 10, marginTop: 4 }}>
+                  <Button className="ghost" onClick={() => { setDeleteTarget(null); setProductUsage(null); }}>Cancel</Button>
+                  <Button className="primary" style={{ background: "var(--red)", border: "none" }} onClick={hardDeleteProduct}>
+                    Delete Product
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -4142,11 +4564,47 @@ function AuditLogs() {
 
 /*  PURCHASES  */
 function Purchases() {
-  const [products, setProducts] = useState<Product[]>([]); const [suppliers, setSuppliers] = useState<Supplier[]>([]); const [rows, setRows] = useState<any[]>([]);
-  const [productId, setProductId] = useState(""); const [supplierId, setSupplierId] = useState(""); const [quantity, setQuantity] = useState("1"); const [unitPrice, setUnitPrice] = useState(""); const [invoice, setInvoice] = useState(""); const [error, setError] = useState<unknown>();
+  const [products, setProducts] = useState<Product[]>([]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [rows, setRows] = useState<any[]>([]);
+  const [productId, setProductId] = useState("");
+  const [supplierId, setSupplierId] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [unitPrice, setUnitPrice] = useState("");
+  const [mrp, setMrp] = useState("");
+  const [invoice, setInvoice] = useState("");
+  const [error, setError] = useState<unknown>();
+
   const load = () => Promise.all([api("/api/products"), api("/api/suppliers"), api("/api/purchases")]).then(([p, s, r]) => { setProducts(p); setSuppliers(s); setRows(r); }).catch(setError);
   useEffect(() => { load(); }, []);
-  const submit = async (e: FormEvent) => { e.preventDefault(); try { await api("/api/purchases", { method: "POST", body: JSON.stringify({ supplierId: supplierId || undefined, invoiceNumber: invoice, items: [{ productId, quantity: Number(quantity), unitPrice: Number(unitPrice) }] }) }); setInvoice(""); load(); } catch (e) { setError(e); } };
+
+  const selectedProd = products.find(x => x.id === productId);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    try {
+      await api("/api/purchases", {
+        method: "POST",
+        body: JSON.stringify({
+          supplierId: supplierId || undefined,
+          invoiceNumber: invoice,
+          items: [{ productId, quantity: Number(quantity), unitPrice: Number(unitPrice), mrp: mrp ? Number(mrp) : undefined }]
+        })
+      });
+      setInvoice("");
+      setProductId("");
+      setUnitPrice("");
+      setMrp("");
+      setQuantity("1");
+      load();
+    } catch (e) { setError(e); }
+  };
+
+  const isPriceChanged = selectedProd && (
+    (unitPrice && Math.abs(Number(unitPrice) - Number(selectedProd.purchasePrice)) > 0.0001) ||
+    (mrp && selectedProd.mrp != null && Math.abs(Number(mrp) - Number(selectedProd.mrp)) > 0.0001)
+  );
+
   return (
     <Page title="Purchases" eyebrow="Stock Receiving">
       <ErrorState error={error} />
@@ -4154,13 +4612,58 @@ function Purchases() {
         <form className="panel form-panel" onSubmit={submit}>
           <h2>Receive Stock Purchase</h2>
           <Field label="Supplier Invoice #" required value={invoice} onChange={(e: any) => setInvoice(e.target.value)} />
-          <Select label="Supplier" value={supplierId} onChange={(e: any) => setSupplierId(e.target.value)}><option value="">Direct purchase</option>{suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</Select>
-          <Select label="Product" required value={productId} onChange={(e: any) => { setProductId(e.target.value); const p = products.find(x => x.id === e.target.value); if (p) setUnitPrice(String(p.purchasePrice)); }}><option value="">Choose Product</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</Select>
-          <div className="form-grid"><Field label="Quantity" type="number" min="1" required value={quantity} onChange={(e: any) => setQuantity(e.target.value)} /><Field label="Unit Cost ()" type="number" min="0" required value={unitPrice} onChange={(e: any) => setUnitPrice(e.target.value)} /></div>
-          <Button className="primary wide">Receive Stock & Add to Inventory</Button>
+          <Select label="Supplier" value={supplierId} onChange={(e: any) => setSupplierId(e.target.value)}>
+            <option value="">Direct purchase</option>
+            {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </Select>
+          <Select label="Product" required value={productId} onChange={(e: any) => {
+            setProductId(e.target.value);
+            const p = products.find(x => x.id === e.target.value);
+            if (p) {
+              setUnitPrice(String(p.purchasePrice));
+              setMrp(p.mrp != null ? String(p.mrp) : "");
+            }
+          }}>
+            <option value="">Choose Product</option>
+            {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </Select>
+
+          {selectedProd && (
+            <div style={{ background: "var(--surface-alt, #f8fafc)", border: "1px solid var(--border)", borderRadius: 6, padding: "8px 12px", fontSize: 12, margin: "6px 0 10px" }}>
+              <div>Current Purchase Price: <strong>₹{money(selectedProd.purchasePrice)}</strong> | Current MRP: <strong>{selectedProd.mrp != null ? `₹${money(selectedProd.mrp)}` : "—"}</strong></div>
+              {(selectedProd.previousPurchasePrice != null || selectedProd.previousMRP != null) && (
+                <div style={{ color: "var(--text-3)", fontSize: 11, marginTop: 3 }}>
+                  Previous Purchase Price: {selectedProd.previousPurchasePrice != null ? `₹${money(selectedProd.previousPurchasePrice)}` : "—"} | Previous MRP: {selectedProd.previousMRP != null ? `₹${money(selectedProd.previousMRP)}` : "—"}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="form-grid-3" style={{ gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            <Field label="Quantity" type="number" min="1" required value={quantity} onChange={(e: any) => setQuantity(e.target.value)} />
+            <Field label="Purchase Price (₹)" type="number" step="0.01" min="0" required value={unitPrice} onChange={(e: any) => setUnitPrice(e.target.value)} />
+            <Field label="MRP (₹)" type="number" step="0.01" min="0" value={mrp} onChange={(e: any) => setMrp(e.target.value)} placeholder="MRP" />
+          </div>
+
+          {isPriceChanged && (
+            <div style={{ background: "#fffbeb", border: "1px solid #fef3c7", color: "#b45309", padding: "8px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, margin: "10px 0 6px" }}>
+              ℹ️ Price changed from previous purchase.
+            </div>
+          )}
+
+          <Button className="primary wide" style={{ marginTop: 10 }}>Receive Stock & Add to Inventory</Button>
         </form>
         <article className="panel table-panel">
-          <Table headers={["Invoice", "Supplier", "Total", "Date"]}>{rows.map(r => <tr key={r.id}><td><strong>{r.invoiceNumber}</strong></td><td className="text-muted">{r.supplier?.name || "Direct"}</td><td style={{ fontWeight: 700 }}>{money(r.total)}</td><td className="text-muted">{new Date(r.createdAt).toLocaleDateString()}</td></tr>)}</Table>
+          <Table headers={["Invoice", "Supplier", "Total", "Date"]}>
+            {rows.map(r => (
+              <tr key={r.id}>
+                <td><strong>{r.invoiceNumber}</strong></td>
+                <td className="text-muted">{r.supplier?.name || "Direct"}</td>
+                <td style={{ fontWeight: 700 }}>{money(r.total)}</td>
+                <td className="text-muted">{new Date(r.createdAt).toLocaleDateString()}</td>
+              </tr>
+            ))}
+          </Table>
         </article>
       </div>
     </Page>
@@ -4856,33 +5359,33 @@ function DataHealth() {
 /*  NAVIGATION  */
 type NavItem = { label: string; icon: string; section?: string; adminOnly?: boolean };
 const ADMIN_NAV: NavItem[] = [
-  { label: "Dashboard", icon: "", section: "OPERATIONS" },
-  { label: "Billing", icon: "" },
+  { label: "Dashboard", icon: "📊", section: "OPERATIONS" },
+  { label: "Billing", icon: "🛒" },
   { label: "Bills", icon: "🧾" },
-  { label: "Products", icon: "", section: "CATALOGUE" },
-  { label: "Categories", icon: "" },
-  { label: "Inventory", icon: "" },
-  { label: "Purchases", icon: "" },
-  { label: "Suppliers", icon: "" },
-  { label: "Customers", icon: "", section: "CUSTOMERS" },
-  { label: "Shifts", icon: "", section: "REGISTERS & PROMOS" },
-  { label: "Offers", icon: "" },
-  { label: "Expenses", icon: "", section: "BUSINESS" },
-  { label: "Reports", icon: "" },
-  { label: "Owner Dashboard", icon: "", section: "ADMINISTRATION" },
-  { label: "Cashiers", icon: "" },
-  { label: "Audit Log", icon: "" },
-  { label: "Data Health", icon: "" },
-  { label: "Settings", icon: "", section: "SYSTEM" },
-  { label: "Printer Settings", icon: "" },
+  { label: "Products", icon: "📦", section: "CATALOGUE" },
+  { label: "Categories", icon: "🏷️" },
+  { label: "Inventory", icon: "🏬" },
+  { label: "Purchases", icon: "📥" },
+  { label: "Suppliers", icon: "🚚" },
+  { label: "Customers", icon: "👥", section: "CUSTOMERS" },
+  { label: "Shifts", icon: "⏱️", section: "REGISTERS & PROMOS" },
+  { label: "Offers", icon: "🎁" },
+  { label: "Expenses", icon: "💸", section: "BUSINESS" },
+  { label: "Reports", icon: "📈" },
+  { label: "Owner Dashboard", icon: "👑", section: "ADMINISTRATION" },
+  { label: "Cashiers", icon: "👤" },
+  { label: "Audit Log", icon: "📜" },
+  { label: "Data Health", icon: "🩺" },
+  { label: "Settings", icon: "⚙️", section: "SYSTEM" },
+  { label: "Printer Settings", icon: "🖨️" },
 ];
 const CASHIER_NAV: NavItem[] = [
-  { label: "My Shift", icon: "", section: "SHIFT" },
-  { label: "Billing", icon: "" },
+  { label: "My Shift", icon: "⏱️", section: "SHIFT" },
+  { label: "Billing", icon: "🛒" },
   { label: "Bills", icon: "🧾" },
-  { label: "Customers", icon: "", section: "CUSTOMERS" },
-  { label: "Inventory", icon: "" },
-  { label: "Shifts", icon: "" },
+  { label: "Customers", icon: "👥", section: "CUSTOMERS" },
+  { label: "Inventory", icon: "📦" },
+  { label: "Shifts", icon: "⏱️" },
 ];
 
 /*  APP SHELL  */

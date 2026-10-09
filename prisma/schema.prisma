@@ -147,6 +147,8 @@ model Product {
   purchasePrice Decimal
   sellingPrice Decimal
   mrp Decimal?
+  previousPurchasePrice Decimal?
+  previousMRP Decimal?
   taxRate Decimal @default(0)
   stock Decimal @default(0)
   minimumStock Decimal @default(0)
