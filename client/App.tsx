@@ -1525,6 +1525,7 @@ function Billing({ user, onNavigate }: { user?: User; onNavigate: (p: string) =>
     { label: 'Cashiers', section: 'Staff' },
     { label: 'Audit Log' },
     { label: 'Settings', section: 'System' },
+    { label: 'Account & Security' },
   ];
   const cashierNavItems = [
     { label: 'Sales', section: 'My Work' },
@@ -5042,6 +5043,322 @@ function QuickAccessManager() {
   );
 }
 
+/*  ACCOUNT & SECURITY (Owner Credentials)  */
+function AccountSecurity({ currentUser, onUserUpdated }: { currentUser?: User | null; onUserUpdated?: (u: User) => void }) {
+  // Email state
+  const [newEmail, setNewEmail] = useState("");
+  const [emailCurrentPassword, setEmailCurrentPassword] = useState("");
+  const [showEmailPwd, setShowEmailPwd] = useState(false);
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [emailError, setEmailError] = useState("");
+  const [emailSuccess, setEmailSuccess] = useState("");
+
+  // Password state
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showCurrentPwd, setShowCurrentPwd] = useState(false);
+  const [showNewPwd, setShowNewPwd] = useState(false);
+  const [showConfirmPwd, setShowConfirmPwd] = useState(false);
+  const [pwdLoading, setPwdLoading] = useState(false);
+  const [pwdError, setPwdError] = useState("");
+  const [pwdSuccess, setPwdSuccess] = useState("");
+
+  const handleEmailSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setEmailError("");
+    setEmailSuccess("");
+
+    const trimmed = newEmail.trim().toLowerCase();
+    if (!trimmed) {
+      setEmailError("Please enter a new email address.");
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmed)) {
+      setEmailError("Please enter a valid email address.");
+      return;
+    }
+    if (currentUser?.email && trimmed === currentUser.email.toLowerCase()) {
+      setEmailError("New email must be different from your current email.");
+      return;
+    }
+    if (!emailCurrentPassword) {
+      setEmailError("Current password is required to verify identity.");
+      return;
+    }
+
+    setEmailLoading(true);
+    try {
+      const res = await api("/api/account/email", {
+        method: "PATCH",
+        body: JSON.stringify({ newEmail: trimmed, currentPassword: emailCurrentPassword }),
+      });
+      setEmailSuccess(res.message || "Email updated successfully!");
+      setNewEmail("");
+      setEmailCurrentPassword("");
+      if (onUserUpdated && currentUser) {
+        onUserUpdated({ ...currentUser, email: trimmed });
+      }
+    } catch (err: any) {
+      setEmailError(err.message || "Failed to update email.");
+    } finally {
+      setEmailLoading(false);
+    }
+  };
+
+  const handlePasswordSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setPwdError("");
+    setPwdSuccess("");
+
+    if (!currentPassword) {
+      setPwdError("Current password is required.");
+      return;
+    }
+    if (!newPassword) {
+      setPwdError("New password is required.");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setPwdError("New password must be at least 8 characters long.");
+      return;
+    }
+    if (newPassword === currentPassword) {
+      setPwdError("New password must be different from current password.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPwdError("New password and confirmation do not match.");
+      return;
+    }
+
+    setPwdLoading(true);
+    try {
+      const res = await api("/api/account/password", {
+        method: "PATCH",
+        body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
+      });
+      setPwdSuccess(res.message || "Password updated successfully!");
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (err: any) {
+      setPwdError(err.message || "Failed to update password.");
+    } finally {
+      setPwdLoading(false);
+    }
+  };
+
+  return (
+    <Page title="Account & Security" eyebrow="Owner Credentials">
+      <div style={{ maxWidth: 880, display: "flex", flexDirection: "column", gap: 20 }}>
+        {/* Info Banner */}
+        <div className="panel" style={{ background: "var(--bg-2)", display: "flex", alignItems: "center", gap: 14, padding: "14px 18px" }}>
+          <div style={{ fontSize: 28, lineHeight: 1 }}>🔐</div>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>Owner Credentials & Authentication</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+              Active account: <strong>{currentUser?.name || "Owner"}</strong> &bull; Current Email: <strong>{currentUser?.email || "—"}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 20 }}>
+          {/* Change Email Form */}
+          <form className="panel form-panel" onSubmit={handleEmailSubmit}>
+            <h2 style={{ fontSize: 16, margin: "0 0 4px 0" }}>Change Login Email</h2>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 16px 0" }}>
+              Update the email address used to sign in to this SuperMarket POS.
+            </p>
+
+            {emailSuccess && <div className="success">{emailSuccess}</div>}
+            {emailError && <div className="error">{emailError}</div>}
+
+            <label className="field">
+              <span>New Email Address</span>
+              <input
+                className="input"
+                type="email"
+                placeholder="new-owner@supermarket.com"
+                value={newEmail}
+                onChange={e => setNewEmail(e.target.value)}
+                required
+                autoComplete="email"
+              />
+            </label>
+
+            <label className="field">
+              <span>Current Password (Required)</span>
+              <div style={{ position: "relative" }}>
+                <input
+                  className="input"
+                  type={showEmailPwd ? "text" : "password"}
+                  placeholder="Enter current password"
+                  value={emailCurrentPassword}
+                  onChange={e => setEmailCurrentPassword(e.target.value)}
+                  required
+                  autoComplete="current-password"
+                  style={{ paddingRight: 40, width: "100%", boxSizing: "border-box" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowEmailPwd(v => !v)}
+                  style={{
+                    position: "absolute",
+                    right: 8,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: 14,
+                    color: "var(--text-muted)",
+                    padding: 4
+                  }}
+                  title={showEmailPwd ? "Hide password" : "Show password"}
+                >
+                  {showEmailPwd ? "🙈" : "👁️"}
+                </button>
+              </div>
+            </label>
+
+            <div style={{ marginTop: 16 }}>
+              <Button className="primary" type="submit" disabled={emailLoading}>
+                {emailLoading ? "Updating Email..." : "Update Email"}
+              </Button>
+            </div>
+          </form>
+
+          {/* Change Password Form */}
+          <form className="panel form-panel" onSubmit={handlePasswordSubmit}>
+            <h2 style={{ fontSize: 16, margin: "0 0 4px 0" }}>Change Master Password</h2>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 16px 0" }}>
+              Ensure your account is protected with a strong password (minimum 8 characters).
+            </p>
+
+            {pwdSuccess && <div className="success">{pwdSuccess}</div>}
+            {pwdError && <div className="error">{pwdError}</div>}
+
+            <label className="field">
+              <span>Current Password</span>
+              <div style={{ position: "relative" }}>
+                <input
+                  className="input"
+                  type={showCurrentPwd ? "text" : "password"}
+                  placeholder="Enter current password"
+                  value={currentPassword}
+                  onChange={e => setCurrentPassword(e.target.value)}
+                  required
+                  autoComplete="current-password"
+                  style={{ paddingRight: 40, width: "100%", boxSizing: "border-box" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCurrentPwd(v => !v)}
+                  style={{
+                    position: "absolute",
+                    right: 8,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: 14,
+                    color: "var(--text-muted)",
+                    padding: 4
+                  }}
+                  title={showCurrentPwd ? "Hide password" : "Show password"}
+                >
+                  {showCurrentPwd ? "🙈" : "👁️"}
+                </button>
+              </div>
+            </label>
+
+            <label className="field">
+              <span>New Password (Min 8 Characters)</span>
+              <div style={{ position: "relative" }}>
+                <input
+                  className="input"
+                  type={showNewPwd ? "text" : "password"}
+                  placeholder="Enter new password"
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                  style={{ paddingRight: 40, width: "100%", boxSizing: "border-box" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPwd(v => !v)}
+                  style={{
+                    position: "absolute",
+                    right: 8,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: 14,
+                    color: "var(--text-muted)",
+                    padding: 4
+                  }}
+                  title={showNewPwd ? "Hide password" : "Show password"}
+                >
+                  {showNewPwd ? "🙈" : "👁️"}
+                </button>
+              </div>
+            </label>
+
+            <label className="field">
+              <span>Confirm New Password</span>
+              <div style={{ position: "relative" }}>
+                <input
+                  className="input"
+                  type={showConfirmPwd ? "text" : "password"}
+                  placeholder="Re-enter new password"
+                  value={confirmPassword}
+                  onChange={e => setConfirmPassword(e.target.value)}
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                  style={{ paddingRight: 40, width: "100%", boxSizing: "border-box" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPwd(v => !v)}
+                  style={{
+                    position: "absolute",
+                    right: 8,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: 14,
+                    color: "var(--text-muted)",
+                    padding: 4
+                  }}
+                  title={showConfirmPwd ? "Hide password" : "Show password"}
+                >
+                  {showConfirmPwd ? "🙈" : "👁️"}
+                </button>
+              </div>
+            </label>
+
+            <div style={{ marginTop: 16 }}>
+              <Button className="primary" type="submit" disabled={pwdLoading}>
+                {pwdLoading ? "Changing Password..." : "Change Password"}
+              </Button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Page>
+  );
+}
+
 /*  SETTINGS  */
 function Settings({ onNavigate }: { onNavigate?: (page: string) => void }) {
   const [shop, setShop] = useState<any>(); const [error, setError] = useState<unknown>(); const [saved, setSaved] = useState(false);
@@ -5061,6 +5378,18 @@ function Settings({ onNavigate }: { onNavigate?: (page: string) => void }) {
         {onNavigate && (
           <Button className="primary" onClick={() => onNavigate("Printer Settings")}>
             Open Printer Settings &rarr;
+          </Button>
+        )}
+      </div>
+
+      <div className="panel" style={{ marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--bg-2)", padding: "16px" }}>
+        <div>
+          <h3 style={{ margin: 0, fontSize: "16px" }}>🔐 Owner Account & Security</h3>
+          <p style={{ margin: "4px 0 0 0", color: "var(--text-muted)", fontSize: "13px" }}>Update owner login email address and change master password securely.</p>
+        </div>
+        {onNavigate && (
+          <Button className="primary" onClick={() => onNavigate("Account & Security")}>
+            Manage Credentials &rarr;
           </Button>
         )}
       </div>
@@ -5378,6 +5707,7 @@ const ADMIN_NAV: NavItem[] = [
   { label: "Data Health", icon: "🩺" },
   { label: "Settings", icon: "⚙️", section: "SYSTEM" },
   { label: "Printer Settings", icon: "🖨️" },
+  { label: "Account & Security", icon: "🔐" },
 ];
 const CASHIER_NAV: NavItem[] = [
   { label: "My Shift", icon: "⏱️", section: "SHIFT" },
@@ -5435,6 +5765,7 @@ export default function App() {
     "Audit Log": <AuditLogs />,
     Settings: <Settings onNavigate={setPage} />,
     "Printer Settings": <PrinterSettings api={api} userRole={user.role} />,
+    "Account & Security": <AccountSecurity currentUser={user} onUserUpdated={setUser} />,
   };
 
   if (isBilling) {

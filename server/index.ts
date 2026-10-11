@@ -96,7 +96,77 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 });
 app.get("/api/me", auth, async (req, res) => res.json(await db.user.findUnique({ where: { id: getAuth(req).userId }, select: { id: true, name: true, email: true, role: true, shopId: true } })));
 
-/* ── Categories API (Hierarchical) ─────────────────────── */
+/* ── Account Credential Management (Owner only) ─────────── */
+app.patch("/api/account/email", auth, async (req, res) => {
+  const a = getAuth(req);
+  if (a.role !== Role.ADMIN) return res.status(403).json({ error: "Only the Owner can change account credentials." });
+
+  const p = z.object({
+    newEmail: z.string().email("Invalid email address"),
+    currentPassword: z.string().min(1, "Current password is required"),
+  }).safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
+
+  try {
+    const user = await db.user.findUnique({ where: { id: a.userId } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const passwordMatch = await bcrypt.compare(p.data.currentPassword, user.passwordHash);
+    if (!passwordMatch) return res.status(401).json({ error: "Current password is incorrect" });
+
+    const normalizedEmail = p.data.newEmail.trim().toLowerCase();
+    if (normalizedEmail === user.email.toLowerCase()) {
+      return res.status(400).json({ error: "New email must be different from current email" });
+    }
+
+    const existing = await db.user.findUnique({ where: { email: normalizedEmail } });
+    if (existing) return res.status(409).json({ error: "This email is already registered to another account" });
+
+    await db.user.update({ where: { id: a.userId }, data: { email: normalizedEmail } });
+    await db.auditLog.create({ data: { shopId: a.shopId, userId: a.userId, action: "ACCOUNT_EMAIL_CHANGED", entity: "User", entityId: a.userId, metadata: { newEmail: normalizedEmail } } });
+
+    res.json({ ok: true, message: "Email updated successfully. Please use your new email to sign in." });
+  } catch {
+    res.status(500).json({ error: "Failed to update email. Please try again." });
+  }
+});
+
+app.patch("/api/account/password", auth, async (req, res) => {
+  const a = getAuth(req);
+  if (a.role !== Role.ADMIN) return res.status(403).json({ error: "Only the Owner can change account credentials." });
+
+  const p = z.object({
+    currentPassword: z.string().min(1, "Current password is required"),
+    newPassword: z.string().min(8, "New password must be at least 8 characters"),
+    confirmPassword: z.string().min(1, "Please confirm the new password"),
+  }).safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
+
+  if (p.data.newPassword !== p.data.confirmPassword) {
+    return res.status(400).json({ error: "New passwords do not match" });
+  }
+
+  try {
+    const user = await db.user.findUnique({ where: { id: a.userId } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const passwordMatch = await bcrypt.compare(p.data.currentPassword, user.passwordHash);
+    if (!passwordMatch) return res.status(401).json({ error: "Current password is incorrect" });
+
+    const samePassword = await bcrypt.compare(p.data.newPassword, user.passwordHash);
+    if (samePassword) return res.status(400).json({ error: "New password must be different from current password" });
+
+    const newHash = await bcrypt.hash(p.data.newPassword, 12);
+    await db.user.update({ where: { id: a.userId }, data: { passwordHash: newHash } });
+    await db.auditLog.create({ data: { shopId: a.shopId, userId: a.userId, action: "ACCOUNT_PASSWORD_CHANGED", entity: "User", entityId: a.userId, metadata: {} } });
+
+    res.json({ ok: true, message: "Password updated successfully. Your existing sessions will remain active." });
+  } catch {
+    res.status(500).json({ error: "Failed to update password. Please try again." });
+  }
+});
+
+
 app.get("/api/categories", auth, async (req, res) => {
   const a = getAuth(req);
   res.json(await db.category.findMany({

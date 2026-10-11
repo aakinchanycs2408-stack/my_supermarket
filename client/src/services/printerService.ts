@@ -617,7 +617,12 @@ export class PrinterService {
 
     this.qzConnecting = (async () => {
       try {
-        await qz.websocket.connect({ retries: 2, delay: 1 });
+        await Promise.race([
+          qz.websocket.connect({ retries: 0, delay: 0 }),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("QZ Tray connection timed out (service not running)")), 1500)
+          ),
+        ]);
         this.qzActiveStatus = true;
         this.lastError = null;
       } catch (err: any) {
@@ -639,7 +644,12 @@ export class PrinterService {
     try {
       const connected = await this.connectQz();
       if (connected) {
-        const list = await qz.printers.find();
+        const list = await Promise.race([
+          qz.printers.find(),
+          new Promise<string[]>((_, reject) =>
+            setTimeout(() => reject(new Error("Printer search timed out")), 2000)
+          ),
+        ]);
         if (Array.isArray(list) && list.length > 0) {
           return list;
         }

@@ -32,20 +32,31 @@ export function PrinterSettings({ api, userRole }: PrinterSettingsProps) {
     let isMounted = true;
     const loadSettingsAndPrinters = async () => {
       try {
-        const [sett, tmpl, prnters] = await Promise.all([
+        // Fetch saved configuration and templates first
+        const [sett, tmpl] = await Promise.all([
           api("/api/printer-settings").catch(() => DEFAULT_PRINTER_SETTING),
           api("/api/receipt-templates").catch(() => []),
-          PrinterService.getPrinters(),
         ]);
         if (isMounted) {
           if (sett) setConfig({ ...DEFAULT_PRINTER_SETTING, ...sett });
           if (Array.isArray(tmpl)) setTemplates(tmpl);
-          if (Array.isArray(prnters) && prnters.length > 0) setAvailablePrinters(prnters);
           setStatusInfo(PrinterService.getStatus(sett?.printerName));
+          // Unblock the page immediately so the user can configure receipt & printer settings
           setLoading(false);
         }
       } catch (err) {
         if (isMounted) setLoading(false);
+      }
+
+      // Query hardware printers in the background without blocking the screen
+      try {
+        const prnters = await PrinterService.getPrinters();
+        if (isMounted && Array.isArray(prnters) && prnters.length > 0) {
+          setAvailablePrinters(prnters);
+          setStatusInfo(PrinterService.getStatus(config.printerName));
+        }
+      } catch (err) {
+        console.warn("Could not load printer list:", err);
       }
     };
 
@@ -65,11 +76,15 @@ export function PrinterSettings({ api, userRole }: PrinterSettingsProps) {
   }, [api]);
 
   const refreshPrintersList = async () => {
-    setLoading(true);
-    const prnters = await PrinterService.getPrinters();
-    setAvailablePrinters(prnters);
-    setStatusInfo(PrinterService.getStatus(config.printerName));
-    setLoading(false);
+    try {
+      const prnters = await PrinterService.getPrinters();
+      if (Array.isArray(prnters) && prnters.length > 0) {
+        setAvailablePrinters(prnters);
+      }
+      setStatusInfo(PrinterService.getStatus(config.printerName));
+    } catch (err) {
+      console.warn("Failed to refresh printers:", err);
+    }
   };
 
   const updateConfig = (key: keyof PrinterSettingConfig, value: any) => {
