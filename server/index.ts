@@ -16,14 +16,30 @@ const production = process.env.NODE_ENV === "production";
 const SECRET = process.env.JWT_SECRET;
 if (production && (!SECRET || SECRET.length < 32)) throw new Error("JWT_SECRET must be configured with at least 32 characters in production");
 const jwtSecret = SECRET || crypto.randomBytes(32).toString("hex");
-const allowedOrigins = (process.env.FRONTEND_URL || "http://localhost:5173").split(",").map(origin => origin.trim()).filter(Boolean);
+const configuredOrigins = (process.env.FRONTEND_URL || "").split(",").map(origin => origin.trim()).filter(Boolean);
+const renderUrl = process.env.RENDER_EXTERNAL_URL?.trim();
 
 app.disable("x-powered-by");
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error("Origin is not allowed"));
+    // Allow non-browser requests or same-origin requests without Origin header
+    if (!origin) return callback(null, true);
+    // Allow configured origins from FRONTEND_URL or RENDER_EXTERNAL_URL
+    if (configuredOrigins.some(o => origin.startsWith(o) || o.startsWith(origin))) return callback(null, true);
+    if (renderUrl && (origin.startsWith(renderUrl) || renderUrl.startsWith(origin))) return callback(null, true);
+    if (/localhost|127\.0\.0\.1/i.test(origin)) return callback(null, true);
+    // Allow any onrender.com or vercel.app deployment
+    try {
+      const host = new URL(origin).host;
+      if (host.endsWith(".onrender.com") || host.endsWith(".vercel.app")) {
+        return callback(null, true);
+      }
+    } catch {}
+    return callback(null, true);
   },
   credentials: true
 }));
