@@ -2,12 +2,12 @@ services:
   - type: web
     name: retail-pos-api
     runtime: node
-    buildCommand: npm install && npx prisma generate && npm run build
-    startCommand: npx prisma migrate deploy && npm start
+    buildCommand: npm install --include=dev && npx prisma db push --skip-generate && npm run build
+    startCommand: npm start
     healthCheckPath: /api/health
     envVars:
       - key: DATABASE_URL
-        sync: false
+        value: file:./prisma/dev.db
       - key: JWT_SECRET
         sync: false
       - key: FRONTEND_URL

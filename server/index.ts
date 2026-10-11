@@ -2069,7 +2069,7 @@ app.get("/api/admin/data-health", auth, admin, async (req, res) => {
 });
 
 /* ── Printer & Receipt Customizer API ─────────────────────── */
-app.get("/api/printer-settings", auth, async (req, res) => {
+app.get("/api/printer-settings", auth, async (req: express.Request, res: express.Response) => {
   const a = getAuth(req);
   const counterId = (req.query.counterId as string) || a.counterId || null;
   let setting = await db.printerSetting.findFirst({
@@ -2100,7 +2100,7 @@ app.get("/api/printer-settings", auth, async (req, res) => {
   res.json(setting);
 });
 
-app.patch("/api/printer-settings", auth, perm("SETTINGS_MANAGE"), async (req, res) => {
+app.patch("/api/printer-settings", auth, perm("SETTINGS_MANAGE"), async (req: express.Request, res: express.Response) => {
   const a = getAuth(req);
   const counterId = req.body.counterId || null;
   const existing = await db.printerSetting.findFirst({
@@ -2131,7 +2131,7 @@ app.patch("/api/printer-settings", auth, perm("SETTINGS_MANAGE"), async (req, re
   }
 });
 
-app.get("/api/receipt-templates", auth, async (req, res) => {
+app.get("/api/receipt-templates", auth, async (req: express.Request, res: express.Response) => {
   const a = getAuth(req);
   const templates = await db.receiptTemplate.findMany({
     where: { shopId: a.shopId },
@@ -2140,7 +2140,7 @@ app.get("/api/receipt-templates", auth, async (req, res) => {
   res.json(templates);
 });
 
-app.post("/api/receipt-templates", auth, perm("SETTINGS_MANAGE"), async (req, res) => {
+app.post("/api/receipt-templates", auth, perm("SETTINGS_MANAGE"), async (req: express.Request, res: express.Response) => {
   const a = getAuth(req);
   const { name, paperWidth, configuration, isDefault } = req.body;
   if (!name || !configuration) return res.status(400).json({ error: "Name and configuration required" });
@@ -2164,7 +2164,7 @@ app.post("/api/receipt-templates", auth, perm("SETTINGS_MANAGE"), async (req, re
   res.json(template);
 });
 
-app.patch("/api/receipt-templates/:id", auth, perm("SETTINGS_MANAGE"), async (req, res) => {
+app.patch("/api/receipt-templates/:id", auth, perm("SETTINGS_MANAGE"), async (req: express.Request, res: express.Response) => {
   const a = getAuth(req);
   const id = String(req.params.id);
   const { name, paperWidth, configuration, isDefault } = req.body;
@@ -2189,7 +2189,7 @@ app.patch("/api/receipt-templates/:id", auth, perm("SETTINGS_MANAGE"), async (re
   res.json(updated);
 });
 
-app.delete("/api/receipt-templates/:id", auth, perm("SETTINGS_MANAGE"), async (req, res) => {
+app.delete("/api/receipt-templates/:id", auth, perm("SETTINGS_MANAGE"), async (req: express.Request, res: express.Response) => {
   const a = getAuth(req);
   const id = String(req.params.id);
   await db.receiptTemplate.deleteMany({
@@ -2205,7 +2205,7 @@ function money(n: number) { return `₹${n.toFixed(2)}`; }
 const distPath = path.resolve(process.cwd(), "dist");
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
-  app.use((req, res, next) => {
+  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (req.method === "GET" && !req.path.startsWith("/api") && req.accepts("html")) {
       return res.sendFile(path.join(distPath, "index.html"));
     }
