@@ -32,9 +32,12 @@ const api = async (path: string, options: RequestInit = {}) => {
   } catch { throw Error("Cannot connect to the server. Check the API URL and network connection."); }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    if (response.status === 401) throw Error("Your session has expired. Please sign in again.");
-    if (response.status === 403) throw Error("You do not have permission for this action.");
-    throw Error(data.error || "The server could not complete the request.");
+    if (response.status === 401) throw Error(data.error || (token ? "Your session has expired. Please sign in again." : "Invalid email or password."));
+    if (response.status === 403) throw Error(data.error || "You do not have permission for this action.");
+    if (response.status === 404) throw Error(data.error || "API endpoint not found (404). Check if VITE_API_URL is configured in your deployment settings.");
+    if (response.status === 502 || response.status === 504) throw Error("Backend server is starting up or unreachable (502/504). Please try again in 30 seconds.");
+    if (response.status === 503) throw Error(data.error || "Database or backend service unavailable (503). Verify database connection and migrations.");
+    throw Error(data.error || `The server returned error ${response.status}.`);
   }
   return data;
 };
