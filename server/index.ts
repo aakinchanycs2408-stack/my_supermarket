@@ -2236,9 +2236,105 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
 
 export { app, db };
 
+const PERMISSION_CODES = [
+  "BILL_CREATE", "BILL_VIEW", "BILL_CANCEL", "BILL_DISCOUNT",
+  "PRODUCT_VIEW", "PRODUCT_CREATE", "PRODUCT_EDIT", "PRODUCT_DELETE",
+  "INVENTORY_VIEW", "INVENTORY_ADJUST", "PURCHASE_CREATE",
+  "CUSTOMER_VIEW", "CUSTOMER_CREATE", "CUSTOMER_EDIT",
+  "SUPPLIER_VIEW", "SUPPLIER_CREATE", "PAYMENT_VIEW", "REFUND_CREATE",
+  "REPORT_VIEW", "PROFIT_VIEW", "EXPENSE_MANAGE", "CASHIER_MANAGE",
+  "USER_MANAGE", "SETTINGS_MANAGE", "BACKUP_MANAGE"
+];
+
+async function ensureBootstrapAdmin() {
+  try {
+    const userCount = await db.user.count();
+    if (userCount > 0) return;
+
+    console.log("No users found in database. Initializing default store and admin account...");
+    let shop = await db.shop.findFirst();
+    if (!shop) {
+      shop = await db.shop.create({
+        data: {
+          name: "My Retail Store",
+          address: "Indore, Madhya Pradesh",
+          phone: "0000000000",
+          invoicePrefix: "INV"
+        }
+      });
+    }
+
+    let c1 = await db.counter.findFirst({ where: { shopId: shop.id } });
+    if (!c1) {
+      c1 = await db.counter.create({
+        data: { shopId: shop.id, name: "Counter 1" }
+      });
+    }
+
+    // Upsert standard permissions
+    const permissions = await Promise.all(
+      PERMISSION_CODES.map(code => db.permission.upsert({ where: { code }, update: {}, create: { code } }))
+    );
+
+    // Create Owner Admin
+    const adminPasswordHash = await bcrypt.hash("Admin@123", 12);
+    await db.user.create({
+      data: {
+        shopId: shop.id,
+        counterId: c1.id,
+        name: "Owner / Admin",
+        email: "admin@demo.local",
+        passwordHash: adminPasswordHash,
+        role: Role.ADMIN,
+        active: true
+      }
+    });
+
+    // Create Cashier
+    const cashierPasswordHash = await bcrypt.hash("Cashier@123", 12);
+    const cashier = await db.user.create({
+      data: {
+        shopId: shop.id,
+        counterId: c1.id,
+        name: "Rahul",
+        email: "cashier@demo.local",
+        passwordHash: cashierPasswordHash,
+        role: Role.CASHIER,
+        active: true
+      }
+    });
+
+    await db.userPermission.createMany({
+      data: permissions.map(p => ({
+        userId: cashier.id,
+        permissionId: p.id,
+        enabled: ["BILL_CREATE", "BILL_VIEW", "BILL_DISCOUNT", "PRODUCT_VIEW", "CUSTOMER_VIEW", "CUSTOMER_CREATE"].includes(p.code)
+      }))
+    });
+
+    // Add general category and demo products
+    const cat = await db.category.create({ data: { shopId: shop.id, name: "General" } });
+    await db.product.createMany({
+      data: [
+        { shopId: shop.id, categoryId: cat.id, sku: "SKU-001", barcode: "890000000001", name: "Milk 1L", purchasePrice: 45, sellingPrice: 55, mrp: 55, stock: 30, minimumStock: 5 },
+        { shopId: shop.id, categoryId: cat.id, sku: "SKU-002", barcode: "890000000002", name: "Bread", purchasePrice: 35, sellingPrice: 45, mrp: 45, stock: 20, minimumStock: 5 },
+        { shopId: shop.id, categoryId: cat.id, sku: "SKU-003", barcode: "890000000003", name: "Biscuits", purchasePrice: 10, sellingPrice: 15, mrp: 15, stock: 50, minimumStock: 10 },
+      ]
+    });
+    await db.customer.create({ data: { shopId: shop.id, name: "Walk-in Customer", phone: "9999999999" } });
+
+    console.log("Bootstrap complete. Default accounts ready: admin@demo.local / Admin@123");
+  } catch (err) {
+    console.error("Failed to bootstrap default accounts:", err);
+  }
+}
+
 if (process.env.NODE_ENV !== "test") {
   const port = Number(process.env.PORT) || 4000;
-  const server = app.listen(port, "0.0.0.0", () => console.log(JSON.stringify({ event: "server_started", port, environment: process.env.NODE_ENV || "development" })));
+  const server = app.listen(port, "0.0.0.0", async () => {
+    console.log(JSON.stringify({ event: "server_started", port, environment: process.env.NODE_ENV || "development" }));
+    await ensureBootstrapAdmin();
+  });
   const shutdown = async () => { server.close(); await db.$disconnect(); };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
